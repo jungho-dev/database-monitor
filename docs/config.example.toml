@@ -1,0 +1,40 @@
+# config.example.toml
+# Copy this file to ~/.config/database-monitor/config.toml (on Windows %USERPROFILE%\.config\database-monitor\config.toml) and it loads automatically; --config <path> overrides it.
+# The IPs below are documentation-only values (192.0.2.0/24, RFC 5737). Replace them with your real DB addresses.
+
+# Polling interval (250 to 10000 ms)
+poll_interval_ms = 1000
+
+# Use Npcap passive wire capture (false = socket table only)
+enable_pcap = true
+
+# Capture interface name or description substring (omitted = every interface that has an address)
+# interface = "Ethernet"
+
+# Ports to add to the default watched ports (3306, 33060, 5002, 6033, 5432, 1433, 1521, 6379, 27017)
+ports = [3307]
+
+# Classic console (conhost) window font. Windows Terminal uses its profile font. An empty string changes nothing.
+console_font = "D2Coding ligature"
+
+# External DB host aliases. A registered host counts every port except 80 and 443 as a DB connection.
+[hosts]
+"192.0.2.10" = "Dev DB"
+"192.0.2.20" = "Prod DB proxy"
+"192.0.2.30" = "Shared Redis"
+
+# Risk thresholds. Omitted keys keep their defaults.
+# RX and QPS are 10-second averages, repeat is the number of identical SQL runs within 10 seconds. caution = observe / warn = attention / crit = danger.
+[thresholds]
+caution_rx_bps = 262144
+warn_rx_bps = 1048576
+crit_rx_bps = 4194304
+single_rx_warn_bytes = 4194304
+caution_qps = 30
+warn_qps = 100
+crit_qps = 300
+warn_repeat_10s = 30
+crit_repeat_10s = 100
+warn_estab_conns = 35
+crit_estab_conns = 70
+warn_churn_conns = 30
