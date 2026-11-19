@@ -50,7 +50,7 @@ pub fn build_live_fixture(
         dst_ip,
         dst_port,
         payload_len,
-        decoded_sql: sql.map(|text| analyze_sql_text(DbEngine::MySql, text)),
+        decoded_sql: sql.map(|text| analyze_sql_text(DbEngine::MySql, text, true)),
         captured_at: now,
     };
 

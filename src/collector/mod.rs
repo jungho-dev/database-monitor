@@ -1107,7 +1107,7 @@ mod tests {
         for _ in 0..10 {
             let mut decoded_list: Vec<DecodedSql> = overhead_sql
                 .iter()
-                .map(|sql| analyze_sql_text(DbEngine::MySql, sql))
+                .map(|sql| analyze_sql_text(DbEngine::MySql, sql, true))
                 .collect();
             decoded_list.push(decode_wire_sql(3306, &com_ping).expect("com_ping"));
             for decoded in decoded_list {
@@ -1133,7 +1133,7 @@ mod tests {
             dst_ip: db_ip,
             dst_port: 3306,
             payload_len: select_sql.len(),
-            decoded_sql: Some(analyze_sql_text(DbEngine::MySql, select_sql)),
+            decoded_sql: Some(analyze_sql_text(DbEngine::MySql, select_sql, true)),
             captured_at: now,
         };
         engine.ingest_wire_frame(now, "00:00:00", frame, &HashMap::new(), &HashMap::new());
@@ -1156,7 +1156,7 @@ mod tests {
                 dst_ip: db_ip,
                 dst_port: 3306,
                 payload_len: sql.len(),
-                decoded_sql: Some(analyze_sql_text(DbEngine::MySql, &sql)),
+                decoded_sql: Some(analyze_sql_text(DbEngine::MySql, &sql, true)),
                 captured_at: now,
             };
             engine.ingest_wire_frame(now, "00:00:00", frame, &HashMap::new(), &HashMap::new());

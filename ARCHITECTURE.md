@@ -26,6 +26,7 @@
     - Each capture interface has a `database-monitor-wire` worker thread that finishes decoding and passes the result through a bounded channel (16384).
     - A `database-monitor-state-writer` thread writes the UI state file, so the input loop never waits for the disk (section 9).
     - A worker does not queue frames that are not watched, and decodes SQL only in the request direction toward the DB; DB responses (RX) pass only their length.
+    - A request longer than its first segment is held in the worker's own reassembly buffer and decoded once complete (section 5).
     - When the channel is full, the worker drops the frame and counts it (`try_send`), so the UI never blocks.
     - The app bar shows `Capture drops N` (`캡처 누락 N` in Korean) when drops occur, and the log records it once per 60 seconds when the count grows.
 5. **Screen refresh**
@@ -82,6 +83,7 @@ database-monitor/
 │  ├─ analysis/
 │  │  ├─ mod.rs
 │  │  ├─ decoder.rs
+│  │  ├─ reassembly.rs
 │  │  └─ risk.rs
 │  ├─ platform/
 │  │  ├─ mod.rs
@@ -127,6 +129,7 @@ app/cli.rs: clap argument definitions, config merge, text snapshot output
 app/config.rs: default watched ports, thresholds, the config.toml loader, the default config, state file, and log folder paths, local traffic test
 app/model.rs: serializable models (DbEngine, ActorKind, RiskLevel, MonitorSnapshot) and the typed RiskReason, RiskRule, RiskSummary, and stop outcome values
 analysis/decoder.rs: L2 to L4 header parsing, MySQL/PostgreSQL command decoding, SQL normalization, fingerprints, risk patterns
+analysis/reassembly.rs: per-flow reassembly of request segments split across packets, with size, flow count, and time limits
 analysis/risk.rs: per-process risk score with typed reasons, byte formatter
 platform/win_ctrl.rs: window top-most pinning, foreground switch, taskbar blink, classic-console font apply and restore
 collector/mod.rs: MonitorEngine (tick orchestration, sliding windows, snapshot, alerts, bulk stop branch)
@@ -212,7 +215,7 @@ flowchart TB
 4. **Applying wire frames (`ingest_wire_frame`)**
     - A watched destination means send (TX), and a watched source means receive (RX).
     - SQL frames accumulate execution times per fingerprint and create events (latest 150).
-    - Each fingerprint keeps its latest SQL text (values included, first packet range) and target DB for the bottom detail panel.
+    - Each fingerprint keeps its latest SQL text (values included, up to 16 KB after whitespace folding) and target DB for the bottom detail panel.
     - Received bytes are attributed to the previous SQL event of the same connection to measure a single response size; event IDs increase, so the lookup is a binary search.
     - Process name and endpoint strings are built only from SQL frames that are aggregated; the response frame path only sums bytes.
     - TLS and binary frames and local traffic do not enter query counts or fingerprints.
@@ -262,6 +265,12 @@ flowchart TB
     - `WARNING`: `ALTER`
     - `CAUTION`: a full read with no condition or `LIMIT`
     - `INSERT`/`UPDATE`/`DELETE` with a condition and `SELECT *` with `WHERE` are normal app behavior and `SAFE`.
+    - `WHERE`, `FROM`, and `LIMIT` count only as tokens outside string literals, backticks, comments, and parentheses, so a `WHERE` inside a subquery alone does not count.
+    - Leading comments are stripped before the command is classified, and `INSERT ... ON DUPLICATE KEY UPDATE` stays an `INSERT`.
+    - The missing `WHERE` and missing `LIMIT` rules judge only a complete statement: the captured bytes reach the declared length (MySQL packet length, PostgreSQL message length) and the text is at most 16 KB after whitespace folding. A plain-text fallback scan is always incomplete.
+    - An incomplete statement is shown with a trailing ` ...` and never raises those rules; `DROP`/`TRUNCATE`, `ALTER`, and `SLEEP(`/`BENCHMARK(` decide from the leading part and still apply.
+    - Segment reassembly (`analysis/reassembly.rs`): a MySQL text command (`COM_QUERY`, `COM_STMT_PREPARE`) or PostgreSQL `Q`/`P` message longer than its first segment is collected per worker by flow and sequence number (at most 256 KiB per flow, 256 flows, 2 seconds) and judged once when the declared length is reached.
+    - A sequence gap, a timeout, or a limit gives up: the collected front part is reported once as an incomplete statement.
 5. **SQL fingerprint level (over-query SQL tab)**
     - The higher of the statement pattern level and the measured load level is used.
     - Measured load: 100 repeats with an average response of 1 MB/s, or an average response of 4 MB/s, is `CRITICAL`; 100 repeats or an average response of 1 MB/s is `WARNING`.
@@ -392,6 +401,8 @@ sequenceDiagram
     - `collector/process.rs`: own process table and command line, ancestor agent classification, refusal to kill protected processes
     - `collector/wire.rs`, `collector/mod.rs`, `analysis/decoder.rs`, `analysis/risk.rs`: BPF string, TLS not counted, SQL analysis, score
     - `analysis/decoder.rs`: SQL decoding in the request direction only, SQL words inside responses ignored, frames on unwatched ports dropped
+    - `analysis/decoder.rs`: a long indented `UPDATE` keeps its trailing `WHERE`, incomplete statements raise no missing-condition alert, top-level `WHERE` search (subquery, literal, comment, backtick), leading comment classification, PostgreSQL message length
+    - `analysis/reassembly.rs`, `analysis/decoder.rs`: in-order segments assemble, a sequence gap or a timeout gives up as incomplete, size and flow count limits, memory released
     - `collector/mod.rs`: response bytes stay attributed to the latest SQL event and fingerprint after the 150-event rotation
     - `tui/layout.rs`, `tui/cards.rs`, `tui/sort.rs`, `tui/format.rs`: default layout, neighbor minimum size, ratio kept on resize, card order insertion and restore checks, scrollbar thumb math, sort cycle, width fitting
     - `tui/layout_store.rs`: atomic save, save through a symbolic link, a multi-level link chain, a link loop stopping at the depth limit, `.bak` copy, cleanup of stale temporary files only, range checks, invalid entries skipped; every test injects its own temporary path
@@ -419,7 +430,8 @@ sequenceDiagram
 
 1. **Observation scope**
     - SQL text of a TLS-encrypted DB connection cannot be seen; only traffic is aggregated.
-    - The decoder works per packet (capture of up to 2048 bytes); a long SQL split across several segments is recognized from its first packet only.
+    - Capture takes up to 2048 bytes per packet. A segment longer than that (for example large send offload) leaves a sequence gap, so reassembly gives up and the statement stays incomplete: no missing-condition alert, but its front part is still counted as one query.
+    - Reassembly takes in-order segments only; a retransmission or reordering inside a statement also gives up.
     - The local test compares only with the same socket's local IP; connecting to your own PC's DB through another NIC address looks external.
 2. **Numbers**
     - The instant `QPS` rounds down to an integer, so a query rarer than the window can read 0; `평균QPS` (average QPS) rounds up.

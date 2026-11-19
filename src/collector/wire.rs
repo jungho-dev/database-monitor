@@ -5,9 +5,11 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
+use std::time::Instant;
 use crossbeam_channel::{Sender, TrySendError};
 use crate::app::config::MonitorConfig;
 use crate::analysis::decoder::{WireFrame, decode_packet};
+use crate::analysis::reassembly::FlowReassembler;
 
 // 1. 패시브 와이어 캡처 핸들 --------------------------------------------------
 pub struct WireCaptureGuard {
@@ -99,23 +101,26 @@ pub fn start_passive_wire_capture(
         if let Ok(handle) = std::thread::Builder::new()
             .name("database-monitor-wire".to_string())
             .spawn(move || {
+                // 요청 방향 세그먼트 재조립 버퍼 (워커마다 독립)
+                let mut flows = FlowReassembler::default();
                 while !worker_stop.load(Ordering::Relaxed) {
-                    match cap.next_packet() {
-                        Ok(pkt) => {
-                            let Some(frame) = decode_packet(pkt.data, datalink, &worker_cfg)
-                            else {
-                                continue;
-                            };
-                            match worker_tx.try_send(frame) {
-                                Ok(()) => {}
-                                Err(TrySendError::Full(_)) => {
-                                    worker_dropped.fetch_add(1, Ordering::Relaxed);
-                                }
-                                Err(TrySendError::Disconnected(_)) => break,
-                            }
-                        }
-                        Err(pcap::Error::TimeoutExpired) => continue,
+                    // 1. 패킷 해독 (수신 대기 만료는 해독 없이 만료 점검만)
+                    let direct = match cap.next_packet() {
+                        Ok(pkt) => decode_packet(pkt.data, datalink, &worker_cfg, &mut flows),
+                        Err(pcap::Error::TimeoutExpired) => None,
                         Err(_) => break,
+                    };
+
+                    // 2. 포기·만료된 재조립 흐름을 불완전 문장 프레임으로 합류
+                    let abandoned = flows.drain_expired_flows(Instant::now());
+                    for frame in direct.into_iter().chain(abandoned) {
+                        match worker_tx.try_send(frame) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                worker_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(TrySendError::Disconnected(_)) => return,
+                        }
                     }
                 }
             })

@@ -181,6 +181,7 @@ database-monitor --json --no-pcap --interval-ms 500
     - A full-table read with no condition or `LIMIT`.
 5. **Not rated as risk**
     - `INSERT`, `UPDATE`, `DELETE` with a condition, and `SELECT *` with `WHERE`, are normal app behavior and stay `SAFE`.
+    - A missing `WHERE` or `LIMIT` is judged only on a complete statement; a statement cut short by capture is shown with a trailing ` ...` and raises no such alert, and long statements split across packets are reassembled first.
     - TLS and binary packets and Redis commands are not counted as queries; they count as traffic only.
     - Driver and pool housekeeping (`COM_PING`, `SET autocommit`, `COMMIT`, `SELECT 1`, `SELECT @@...`) is excluded from query counts and repeats.
 6. **Alert log**

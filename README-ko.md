@@ -181,6 +181,7 @@ database-monitor --json --no-pcap --interval-ms 500
     - 조건·`LIMIT` 없는 전체 조회
 5. **위험으로 보지 않는 것**
     - 조건 있는 `INSERT`/`UPDATE`/`DELETE`와 `WHERE` 있는 `SELECT *`는 앱 정상 동작으로 보고 `SAFE`다.
+    - `WHERE`·`LIMIT` 없음은 완전한 문장만 판정한다. 캡처가 끊긴 문장은 끝에 ` ...`을 붙여 보여 주고 해당 경보를 내지 않으며, 여러 패킷에 나뉜 긴 문장은 먼저 재조립한다.
     - TLS·바이너리 패킷과 Redis 명령은 쿼리 수에 넣지 않고 트래픽으로만 계산한다.
     - 드라이버·커넥션 풀 관리 명령(`COM_PING`, `SET autocommit`, `COMMIT`, `SELECT 1`, `SELECT @@...`)은 쿼리 수·반복에서 뺀다.
 6. **경보 로그**

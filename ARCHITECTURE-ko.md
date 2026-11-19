@@ -26,6 +26,7 @@
     - 캡처는 인터페이스마다 `database-monitor-wire` 워커 스레드가 디코딩까지 끝내고 bounded 채널(16384)로 넘긴다.
     - `database-monitor-state-writer` 스레드가 UI 상태 파일을 쓰므로 입력 루프는 디스크를 기다리지 않는다(9절).
     - 워커는 감시 대상이 아닌 프레임을 채널에 넣지 않고, SQL 디코딩은 DB로 가는 요청 방향에만 한다. DB 응답(RX)은 길이만 넘긴다.
+    - 첫 세그먼트보다 긴 요청은 워커 전용 재조립 버퍼에 모았다가 완성되면 디코딩한다(5절).
     - 채널이 가득 차면 워커는 프레임을 버리고 누락 수를 센다(`try_send`). UI는 막히지 않는다.
     - 누락이 생기면 앱 바에 `캡처 누락 N`(영어 `Capture drops N`)을 표시하고, 로그에는 늘었을 때 60초에 한 번 남긴다.
 5. **화면 갱신**
@@ -82,6 +83,7 @@ database-monitor/
 │  ├─ analysis/
 │  │  ├─ mod.rs
 │  │  ├─ decoder.rs
+│  │  ├─ reassembly.rs
 │  │  └─ risk.rs
 │  ├─ platform/
 │  │  ├─ mod.rs
@@ -127,6 +129,7 @@ app/cli.rs: clap 인자 정의, 설정 병합, 텍스트 스냅샷 출력
 app/config.rs: 기본 감시 포트, 임계치, config.toml 로더, 설정 파일·상태 파일·로그 폴더 기본 경로, 로컬 통신 판별
 app/model.rs: 직렬화 모델 (DbEngine, ActorKind, RiskLevel, MonitorSnapshot)과 값 타입 RiskReason, RiskRule, RiskSummary, 중단 결과
 analysis/decoder.rs: L2~L4 헤더 파싱, MySQL/PostgreSQL 명령 디코딩, SQL 정규화·핑거프린트·위험 패턴
+analysis/reassembly.rs: 여러 패킷에 나뉜 요청 세그먼트의 흐름별 재조립, 크기·흐름 수·시간 제한
 analysis/risk.rs: 값 사유로 프로세스 위험 점수 산출, 바이트 포맷터
 platform/win_ctrl.rs: 창 최상단 고정, 포그라운드 전환, 작업표시줄 점멸, 클래식 콘솔 글꼴 적용·복원
 collector/mod.rs: MonitorEngine (tick 오케스트레이션, 슬라이딩 창, 스냅샷, 경보, 일괄 중단 분기)
@@ -212,7 +215,7 @@ flowchart TB
 4. **와이어 프레임 반영 (`ingest_wire_frame`)**
     - 목적지가 감시 대상이면 송신(TX), 출발지가 감시 대상이면 수신(RX)으로 본다.
     - SQL 프레임은 핑거프린트별 실행 시각을 쌓고 이벤트(최근 150건)를 만든다.
-    - 핑거프린트마다 최근 실행 원문(값 포함, 첫 패킷 범위)과 대상 DB를 보관해 하단 상세 패널에 보여 준다.
+    - 핑거프린트마다 최근 실행 원문(값 포함, 공백을 접은 뒤 16KB까지)과 대상 DB를 보관해 하단 상세 패널에 보여 준다.
     - 수신 바이트는 같은 연결의 직전 SQL 이벤트에 귀속해 단일 응답 크기를 잰다. 이벤트 ID가 증가 순서라 이분 탐색으로 찾는다.
     - 프로세스 이름·엔드포인트 문자열은 집계 대상 SQL 프레임에서만 만든다. 응답 프레임 경로는 바이트 합산만 한다.
     - TLS·바이너리 프레임과 로컬 통신은 쿼리 수·핑거프린트에 넣지 않는다.
@@ -262,6 +265,12 @@ flowchart TB
     - `WARNING`: `ALTER`
     - `CAUTION`: 조건·`LIMIT` 없는 전체 조회
     - 조건 있는 `INSERT`/`UPDATE`/`DELETE`와 `WHERE` 있는 `SELECT *`는 앱 정상 동작으로 보고 `SAFE`다.
+    - `WHERE`·`FROM`·`LIMIT`은 문자열 리터럴·백틱·주석·괄호 밖의 토큰만 센다. 서브쿼리 안의 `WHERE`만 있는 문장은 조건 없음으로 본다.
+    - 명령 분류 전에 앞쪽 주석을 벗기고, `INSERT ... ON DUPLICATE KEY UPDATE`는 계속 `INSERT`다.
+    - `WHERE` 없음·`LIMIT` 없음 규칙은 완전한 문장만 판정한다. 캡처한 바이트가 선언 길이(MySQL 패킷 길이, PostgreSQL 메시지 길이)에 닿고 공백을 접은 뒤 16KB 이하여야 완전하다. 평문 폴백 스캔은 항상 불완전하다.
+    - 불완전한 문장은 끝에 ` ...`을 붙여 보여 주고 위 규칙을 올리지 않는다. `DROP`/`TRUNCATE`, `ALTER`, `SLEEP(`/`BENCHMARK(`는 앞부분만으로 정해지므로 그대로 적용한다.
+    - 세그먼트 재조립(`analysis/reassembly.rs`): 첫 세그먼트보다 긴 MySQL 텍스트 커맨드(`COM_QUERY`, `COM_STMT_PREPARE`)와 PostgreSQL `Q`/`P` 메시지는 워커별로 흐름·시퀀스 번호로 모아(흐름당 256KiB, 256개 흐름, 2초 이내) 선언 길이에 닿으면 한 번 판정한다.
+    - 시퀀스 누락·시간 초과·상한 초과는 포기하며, 모은 앞부분을 불완전한 문장으로 한 번 보고한다.
 5. **SQL 핑거프린트 등급 (과조회SQL 탭)**
     - 문장 패턴 등급과 실측 부하 등급 중 높은 쪽을 쓴다.
     - 실측 부하: 반복 100회 + 평균 응답 1 MB/s 또는 평균 응답 4 MB/s는 `CRITICAL`, 반복 100회 또는 평균 응답 1 MB/s는 `WARNING`
@@ -392,6 +401,8 @@ sequenceDiagram
     - `collector/process.rs`: 자체 프로세스 테이블·커맨드라인, 상위 에이전트 분류, 보호 프로세스 종료 거부
     - `collector/wire.rs`, `collector/mod.rs`, `analysis/decoder.rs`, `analysis/risk.rs`: BPF 문자열, TLS 미집계, SQL 분석, 점수
     - `analysis/decoder.rs`: 요청 방향만 SQL 디코딩, 응답 안 SQL 단어 무시, 비감시 포트 프레임 제외
+    - `analysis/decoder.rs`: 들여쓰기 많은 긴 `UPDATE`의 끝 `WHERE` 유지, 불완전 문장의 조건 없음 경보 없음, 최상위 `WHERE` 탐색(서브쿼리·리터럴·주석·백틱), 앞 주석 분류, PostgreSQL 메시지 길이
+    - `analysis/reassembly.rs`, `analysis/decoder.rs`: 순서대로 온 세그먼트 조립, 시퀀스 누락·시간 초과 시 불완전로 포기, 크기·흐름 수 상한, 메모리 회수
     - `collector/mod.rs`: 이벤트 150건 회전 후에도 응답 바이트가 최신 SQL 이벤트·핑거프린트에 귀속
     - `tui/layout.rs`, `tui/cards.rs`, `tui/sort.rs`, `tui/format.rs`: 기본 배치, 이웃 카드 최소 크기, 크기 변경 시 비율 유지, 카드 순서 삽입·복원 검증, 스크롤바 썸 계산, 정렬 순환, 폭 맞춤
     - `tui/layout_store.rs`: 원자적 저장, 심볼릭 링크 경유 저장, 다단계 링크 사슬, 단계 상한에서 멈추는 링크 순환, `.bak` 복사, 오래된 임시 파일만 정리, 범위 검사, 잘못된 항목 건너뛰기. 모든 테스트가 자기 임시 경로를 주입한다.
@@ -419,7 +430,8 @@ sequenceDiagram
 
 1. **관찰 범위**
     - TLS로 암호화된 DB 연결은 SQL 원문을 볼 수 없고 트래픽만 집계된다.
-    - 디코더는 패킷 단위(최대 2048바이트 캡처)로 본다. 여러 세그먼트로 나뉜 긴 SQL은 첫 패킷만 SQL로 잡힌다.
+    - 캡처는 패킷당 최대 2048바이트다. 그보다 긴 세그먼트(예: 대용량 송신 오프로드)는 시퀀스 누락을 남겨 재조립을 포기하고 문장은 불완전으로 남는다. 조건 없음 경보는 없지만 앞부분은 쿼리 1건으로 센다.
+    - 재조립은 순서대로 온 세그먼트만 받는다. 문장 중간의 재전송·순서 뒤바뀜도 포기 사유다.
     - 로컬 판별은 같은 소켓의 로컬 IP와만 비교한다. 다른 NIC 주소로 자기 PC DB에 붙으면 외부로 보인다.
 2. **수치**
     - 순간 `QPS`는 정수 내림이다. 창보다 드문 쿼리는 0으로 보일 수 있다. `평균QPS`는 올림이다.
