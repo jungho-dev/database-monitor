@@ -17,9 +17,10 @@ use crate::tui::layout::SplitAxis;
 use crate::tui::state::AppState;
 use crate::tui::theme;
 
-// 글자 열이 줄어드는 최소 폭 (드래그 하한 포함), 열 사이 간격
+// 글자 열이 줄어드는 최소 폭 (드래그 하한 포함), 열 사이 간격, 열 경계 잡는 칸이 양옆 열로 넓어지는 칸 수
 const MIN_COLUMN_WIDTH: u16 = 3;
 const TABLE_COLUMN_GAP: u16 = 1;
+const COLUMN_GRAB_REACH: u16 = 1;
 
 // 표 열 맞춤: 숫자·짧은 열은 고정, 글자 열은 좁아지면 먼저 줄고(Shrink), 남는 폭은 맨 오른쪽 Grow 열이 가짐
 // Pinned 는 위험 등급처럼 끝까지 남길 고정 폭 열 (다른 열이 모두 숨은 뒤에야 오른쪽부터 숨김)
@@ -292,13 +293,33 @@ pub fn render_card_table(frame: &mut Frame, state: &mut AppState, area: Rect, ta
         }
 
         // 열 경계 (마지막 보이는 열 오른쪽은 경계 없음, 폭 범위 = 다른 열 최소 폭을 남긴 만큼)
+        // 잡는 칸은 경계 칸 양옆으로 한 칸씩 넓힘 (옆 열이 최소 폭보다 넓을 때만, 이웃 경계 잡는 칸과 겹치지 않음)
+        // 세로선은 머리글과 그려진 본문 행 높이
         if position + 1 < shown.len() && *index < MAX_TABLE_COLUMNS && inner.height > 0 {
             let others_floor = (shown_floors - plans[*index].floor).saturating_add(shown_gaps);
+            let edge_x = cursor + width;
+            let next_width = widths[shown[position + 1]];
+            let reach_left = if width > MIN_COLUMN_WIDTH {
+                COLUMN_GRAB_REACH
+            } else {
+                0
+            };
+            let reach_right = if next_width > MIN_COLUMN_WIDTH {
+                COLUMN_GRAB_REACH
+            } else {
+                0
+            };
+            let drawn_rows = total.saturating_sub(scroll).min(visible) as u16;
             state.hit_areas.column_hits.push(ColumnHit {
                 card,
                 column: *index,
-                grab: Rect::new(cursor + width, inner.y, TABLE_COLUMN_GAP, 1),
-                line: Rect::new(cursor + width, inner.y, TABLE_COLUMN_GAP, inner.height),
+                grab: Rect::new(
+                    edge_x - reach_left,
+                    inner.y,
+                    reach_left + TABLE_COLUMN_GAP + reach_right,
+                    1,
+                ),
+                line: Rect::new(edge_x, inner.y, TABLE_COLUMN_GAP, 1 + drawn_rows),
                 width,
                 min: plans[*index].floor,
                 max: inner
@@ -519,21 +540,22 @@ pub fn render_split_handles(frame: &mut Frame, state: &AppState) {
 }
 
 // 7. 열 경계 손잡이 -----------------------------------------------------------
-// 평소에는 아무것도 그리지 않고, 마우스 아래는 머리글 칸 하나·끄는 동안은 표 높이 전체 세로선
+// 평소에는 머리글 행 경계 칸에 흐린 │ 로 위치만 표시, 마우스 아래·끄는 동안은 머리글과 본문 행 전체 세로선 ┃
 pub fn render_column_handles(frame: &mut Frame, state: &AppState) {
     let dragging = state.column_drag.map(|drag| (drag.card, drag.column));
     let buf = frame.buffer_mut();
     for hit in &state.hit_areas.column_hits {
         let key = Some((hit.card, hit.column));
-        let dragged = dragging == key;
-        let hovered = dragging.is_none() && state.column_hover == key;
-        if !dragged && !hovered {
-            continue;
-        }
-        let (color, line) = if dragged {
-            (theme::SPLIT_GRIP_DRAG, hit.line)
+        let line = hit.line;
+        let color = if dragging == key {
+            theme::SPLIT_GRIP_DRAG
+        } else if dragging.is_none() && state.column_hover == key {
+            theme::SPLIT_GRIP_HOT
         } else {
-            (theme::SPLIT_GRIP_HOT, hit.grab)
+            buf[(line.x, line.y)]
+                .set_symbol("│")
+                .set_fg(theme::FG_FAINT);
+            continue;
         };
         for y in line.y..line.bottom() {
             buf[(line.x, y)].set_symbol("┃").set_fg(color);

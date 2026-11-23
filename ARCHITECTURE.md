@@ -50,7 +50,7 @@
     - Sorting and alert de-duplication use the typed values (the diagnosis columns compare `RiskReason`, the alert key is `(PID, RiskRule)`), so a language switch never reorders rows or moves the selection.
     - Non-TUI output is English: the `--once` text, log lines, and stderr notices; `--json` keeps its field names and carries the English catalog text in the reason fields.
 9. **State file**
-    - `~/.config/database-monitor/tui.toml` holds the version, language, card orders, split ratios, and column widths; see section 9.
+    - `~/.config/database-monitor/tui.toml` holds the version, language, card orders, split ratios, column widths, and the tab order (`tab_order`, written only when not the default and skipped unless it is a permutation of the four tabs; `l` keeps it); see section 9.
 
 ---
 
@@ -101,11 +101,13 @@ database-monitor/
 │     ├─ layout.rs
 │     ├─ layout_store.rs
 │     ├─ state_writer.rs
-│     ├─ interaction.rs
 │     ├─ format.rs
 │     ├─ cards.rs
+│     ├─ card_move.rs
+│     ├─ mouse.rs
 │     ├─ sort.rs
 │     ├─ poller.rs
+│     ├─ tab_move.rs
 │     └─ views/
 │        ├─ mod.rs
 │        ├─ common.rs
@@ -143,7 +145,9 @@ tui/i18n.rs: English and Korean message catalog, including the text of typed rea
 tui/layout.rs: per-group border ratios and card order, split within minimum sizes, border drag areas
 tui/layout_store.rs: tui.toml load, atomic save, symbolic link chain resolution, stale temporary file cleanup
 tui/state_writer.rs: state save thread (coalescing queue, bounded join on exit, failures returned as a UiMessage)
-tui/interaction.rs: pointer gestures with an injected clock (hover, click, drags, long press, wheel, Shift+arrows)
+tui/mouse.rs: pointer gestures with an injected clock (hover, click, card border, column edge, scrollbar, and tab drags, wheel)
+tui/card_move.rs: card move (long press on the title, preview, commit, cancel, Shift+arrows)
+tui/tab_move.rs: tab reordering by tab drag and the `<` `>` keys
 tui/format.rs: display-width text fitting
 tui/cards.rs: card ids and kinds, hit areas, scrollbar thumb math
 tui/sort.rs: typed sort keys and the three-step sort cycle
@@ -368,7 +372,7 @@ sequenceDiagram
 ## 9. TUI
 
 1. **Module layout**
-    - `tui/` splits by responsibility: state, theme, message catalog, layout, state store, interaction, text fitting, cards, and `views/` with one file per tab plus `common.rs`.
+    - `tui/` splits by responsibility: state, theme, message catalog, layout, state store, pointer gestures (mouse), card move, tab move, text fitting, cards, and `views/` with one file per tab plus `common.rs`.
     - State changes return a command enum; `tui/mod.rs` sends I/O commands to the collector thread, so views stay pure functions over `AppState` that only record hit areas.
 2. **Lifecycle**
     - Raw mode, the alternate screen, mouse capture, and a hidden cursor are entered together and restored by a `Drop` guard and a panic hook that share one idempotent restore; the console font guard stays.
@@ -378,11 +382,13 @@ sequenceDiagram
     - Save: a commit event builds the file text on the UI thread and queues it to the `database-monitor-state-writer` thread (`tui/state_writer.rs`); requests for one path coalesce to the latest, a failed write comes back as `UiMessage::StateSaveFailed` and shows an error toast, and on exit the guard writes the remaining request and joins with a 5-second limit (a stderr warning when the disk stalls longer).
     - Write: temporary file in the resolved file's folder, `sync_all`, then rename over the resolved file; the symbolic link chain is followed up to 16 links (a longer chain or a loop is an error), so a link to a synced folder keeps pointing to the same target.
     - Load: temporary files older than 60 seconds (and not this process's) are removed, so another running instance's file stays; an unreadable or other-version file is copied to `tui.toml.bak` before the first overwrite, and invalid entries are skipped; column widths are capped at 512.
-    - Save happens only on commit events (card move, split drag, column drag, language switch, layout reset), never on render, hover, or scroll.
+    - Save happens only on commit events (card move, split drag, column drag, tab move, language switch, layout reset), never on render, hover, or scroll.
 4. **Cards and gestures**
     - A 400 ms long press on a card title enters move mode; dragging previews the new order live, release commits, `Esc`, a resize, or a tab switch restores the order.
     - A lost button release resolves to what the screen shows: the first buttonless move or a new press commits the preview, and that press is consumed.
     - The same rule ends card border, column width, and scrollbar drags: a buttonless move ends them like a release and returns a save request when something moved; a new press resets every drag state first (a moved drag is saved and that press is consumed), and a tab switch commits a moved drag.
+    - Pressing a tab and dragging it previews the new tab order, release commits and saves it, `Esc` restores the order from before the press, and a lost release commits the preview; `<` and `>` move the current tab one slot.
+    - A column edge shows a faint `│` in the header row at rest; it is grabbed from the edge cell and one header cell on each side, and on hover or drag a `┃` spans the full table height.
     - The move-mode card uses a dashed border (`BorderType::LightDoubleDashed`); double lines stay reserved for overlays.
     - `Shift+arrows` move the focused card on groups drawn this frame; `l` resets order, sizes, and column widths of the tab and keeps the language.
 5. **Tables**
@@ -416,7 +422,7 @@ sequenceDiagram
     - `tests/tui.rs` renders every tab in English and Korean at 60x16, 100x30, and 130x40 plus below-minimum sizes
     - Exact cells: focus corner and color, scrollbar thumb, track, and gutter color, selected row band, toast fill, language, help, and quit chips at the minimum size
     - Hit areas for tabs, chips, rows, headers, column edges, scrollbar tracks, card titles, and the overlay buttons
-    - Gestures through injected clocks: long press, drag preview, commit, cancel, lost release (card move, card border, column width, and scrollbar drags), a new press resetting drag states, a tab switch committing a moved drag, double-click
+    - Gestures through injected clocks: long press, drag preview, commit, cancel, lost release (card move, card border, column width, scrollbar, and tab drags), a new press resetting drag states, a tab switch committing a moved drag, double-click
     - Kill safety: `K`, `x`, `F9`, `F12`, and `y` ignored at 59x15, 59x16, and 60x15, a shrink cancelling an open confirmation, the emergency stop confirmation (targets, critical tone, filled `Y`, `y` required), and `k` and `j` moving the selection
     - The move-mode card border cells (`LightDoubleDashed`, no double line)
     - Sort cycle, column resolver (including the pinned risk column), split ratios, and the rule that colors live only in `theme.rs` and views hold no inline Korean text

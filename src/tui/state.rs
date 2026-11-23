@@ -13,6 +13,7 @@ use crate::tui::cards::{
 use crate::tui::i18n::{self, Lang, Msg};
 use crate::tui::layout::{CardLayout, SplitDrag, SplitGroup};
 use crate::tui::sort::{self, SortChange, TableSorts};
+use crate::tui::tab_move::TabDrag;
 use crate::tui::views::{MIN_HEIGHT, MIN_WIDTH};
 
 pub const TAB_COUNT: usize = 4;
@@ -46,6 +47,16 @@ impl ActiveTab {
             Self::Alerts => Msg::TabAlerts,
         };
         i18n::text(lang, msg)
+    }
+
+    // 상태 파일의 탭 순서 값 (표시 언어와 무관한 고정 이름)
+    pub fn tab_key(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Processes => "processes",
+            Self::TopSql => "top_sql",
+            Self::Alerts => "alerts",
+        }
     }
 
     // 클릭한 카드가 없을 때 키 입력을 받는 탭의 주 카드
@@ -159,6 +170,9 @@ pub struct AppState {
     // 이벤트 루프가 갱신하는 현재 시각 (알림 만료·갱신 신선도 기준, 테스트가 주입)
     pub now: Instant,
     pub tab: ActiveTab,
+    // 탭 바 표시 순서 (번호 키·Tab 순환이 따름, tui.toml 로 저장·복원), 탭을 눌러 끄는 중
+    pub tab_order: [ActiveTab; TAB_COUNT],
+    pub tab_drag: Option<TabDrag>,
     pub snapshot: Option<Arc<MonitorSnapshot>>,
     pub snapshot_at: Option<Instant>,
     pub paused: bool,
@@ -210,6 +224,8 @@ impl AppState {
             lang: Lang::default(),
             now,
             tab: ActiveTab::Overview,
+            tab_order: ActiveTab::ALL,
+            tab_drag: None,
             snapshot: None,
             snapshot_at: None,
             paused: false,
@@ -248,7 +264,7 @@ impl AppState {
     // 이미 움직인 경계·열 폭 끌기는 탭을 바꿔도 확정해 저장 (창 밖에서 놓아 놓친 끌기도 포함)
     pub fn switch_tab(&mut self, tab: ActiveTab) -> UiCommand {
         self.cancel_card_move();
-        let drag_moved = self.end_pointer_drags(self.now);
+        let drag_moved = self.end_drags(None);
         self.last_column_click = None;
         self.tab = tab;
         self.hover_card = None;
@@ -345,28 +361,42 @@ impl AppState {
             };
         }
 
-        // 4. 카드 이동 중·길게 누름 대기 중에는 Esc 취소만 받음
-        if self.card_move.is_some() || self.card_press.is_some() {
+        // 4. 카드·탭 이동 중·길게 누름 대기 중에는 Esc 취소만 받음
+        // 순서를 바꾸지 않은 탭 누름은 끝내고 키 처리, 단 Esc 는 끌기 취소로만 쓰여 종료로 넘어가지 않음
+        if let Some(drag) = self.tab_drag
+            && drag.baseline == self.tab_order
+            && key.code != KeyCode::Esc
+        {
+            self.tab_drag = None;
+        }
+        if self.card_move.is_some() || self.card_press.is_some() || self.tab_drag.is_some() {
             if key.code == KeyCode::Esc {
                 self.cancel_card_move();
+                self.cancel_tab_drag();
             }
             return UiCommand::None;
         }
 
-        // 5. 키별 전이
-        let slot = self.tab as usize;
+        // 5. 키별 전이 (번호 키·Tab 순환은 탭 바 표시 순서를 따름)
+        let slot = self
+            .tab_order
+            .iter()
+            .position(|tab| *tab == self.tab)
+            .unwrap_or(0);
         let card = self.focused_card_id();
         match key.code {
             KeyCode::Char('q' | 'Q') | KeyCode::Esc => self.perform_action(UiAction::Quit),
             KeyCode::Char('?') => self.perform_action(UiAction::ShowHelp),
-            KeyCode::BackTab => self.switch_tab(ActiveTab::ALL[(slot + TAB_COUNT - 1) % TAB_COUNT]),
+            KeyCode::BackTab => self.switch_tab(self.tab_order[(slot + TAB_COUNT - 1) % TAB_COUNT]),
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.switch_tab(ActiveTab::ALL[(slot + TAB_COUNT - 1) % TAB_COUNT])
+                self.switch_tab(self.tab_order[(slot + TAB_COUNT - 1) % TAB_COUNT])
             }
-            KeyCode::Tab => self.switch_tab(ActiveTab::ALL[(slot + 1) % TAB_COUNT]),
+            KeyCode::Tab => self.switch_tab(self.tab_order[(slot + 1) % TAB_COUNT]),
             KeyCode::Char(digit @ '1'..='4') => {
-                self.switch_tab(ActiveTab::ALL[digit as usize - '1' as usize])
+                self.switch_tab(self.tab_order[digit as usize - '1' as usize])
             }
+            KeyCode::Char('<') => self.move_current_tab(-1),
+            KeyCode::Char('>') => self.move_current_tab(1),
             // Shift+방향키는 포커스 카드 위치 이동 (일반 방향키보다 먼저)
             KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
                 if key.modifiers.contains(KeyModifiers::SHIFT) =>

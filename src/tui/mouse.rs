@@ -1,17 +1,17 @@
-//! interaction.rs
+//! mouse.rs
 //! 포인터 제스처 상태 전이(시각 주입): 호버, 클릭 포커스·선택·정렬·칩, 경계·열 폭·썸 드래그, 카드 제목 길게 누름 이동, 휠.
 
 use std::time::{Duration, Instant};
-use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 use crate::tui::cards::{
-    CARD_HOLD_TIME, CardId, CardMove, CardPress, ColumnDrag, MAX_TABLE_COLUMNS, ScrollDrag,
-    UiAction, scroll_for_thumb, scroll_thumb,
+    CardPress, ColumnDrag, MAX_TABLE_COLUMNS, ScrollDrag, UiAction, scroll_for_thumb, scroll_thumb,
 };
 use crate::tui::i18n::{self, Msg};
 use crate::tui::layout::{SplitAxis, SplitDrag};
 use crate::tui::sort::SortChange;
 use crate::tui::state::{AppState, ToastLevel, UiCommand};
+use crate::tui::tab_move::TabDrag;
 
 // 휠 한 칸에 움직일 줄 수, 열 경계 더블클릭 인정 간격
 const WHEEL_STEP: isize = 3;
@@ -55,7 +55,7 @@ impl AppState {
                 // 버튼 없는 움직임 = 이미 뗌, 대기 중 누름은 일반 클릭으로 끝 (포커스는 누를 때 반영)
                 // 드래그 중이던 경계·열 폭·스크롤바도 뗀 것으로 보고 Up 과 같이 끝냄 (마우스를 창 밖에서 놓은 경우)
                 self.card_press = None;
-                let drag_moved = self.end_pointer_drags(now);
+                let drag_moved = self.end_drags(Some(now));
                 self.track_hover(position);
                 if drag_moved {
                     UiCommand::SaveState
@@ -64,7 +64,9 @@ impl AppState {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.card_move.is_some() {
+                if self.tab_drag.is_some() {
+                    self.preview_tab_move(position);
+                } else if self.card_move.is_some() {
                     self.preview_card_move(position);
                 } else if let Some(press) = self.card_press {
                     // 누른 칸을 벗어나 시간이 차기 전에 끌면 취소 (같은 칸의 흔들림은 유지)
@@ -86,7 +88,7 @@ impl AppState {
                 if self.card_move.is_some() {
                     return self.commit_card_move();
                 }
-                if self.end_pointer_drags(now) {
+                if self.end_drags(Some(now)) {
                     UiCommand::SaveState
                 } else {
                     UiCommand::None
@@ -102,7 +104,7 @@ impl AppState {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 // 놓기를 놓친 이전 드래그는 새 누름 전에 모두 끝냄, 이미 움직인 것이 있었으면 저장하고 이 누름은 클릭으로 실행하지 않음
-                if self.end_pointer_drags(now) {
+                if self.end_drags(None) {
                     return UiCommand::SaveState;
                 }
                 self.press_left(position, now)
@@ -112,21 +114,28 @@ impl AppState {
     }
 
     // 1-1. 경계·열 폭·스크롤바 드래그 끝내기 ----------------------------------
-    // Up·버튼 없는 Moved·새 누름·탭 전환이 공유, 반환 = 실제로 움직인 드래그가 있었는지 (저장 필요)
-    // 끌지 않고 뗀 열 경계 클릭만 더블클릭 후보로 기록
-    pub fn end_pointer_drags(&mut self, now: Instant) -> bool {
+    // Up·버튼 없는 Moved·새 누름·탭 전환·크기 변경이 공유, 반환 = 실제로 움직인 드래그가 있었는지 (저장 필요)
+    // click_at 이 있으면 끌지 않고 뗀 클릭을 처리: 경계 옆 머리글 칸은 그 열 정렬, 경계 칸은 더블클릭 후보로 기록
+    pub fn end_drags(&mut self, click_at: Option<Instant>) -> bool {
         let split_moved = self.split_drag.take().is_some_and(|drag| drag.moved);
         self.scroll_drag = None;
-        let mut column_moved = false;
-        if let Some(drag) = self.column_drag.take() {
-            column_moved = drag.moved;
-            self.last_column_click = if drag.moved {
-                None
-            } else {
-                Some((drag.card, drag.column, now))
-            };
+        let column_drag = self.column_drag.take();
+        let column_moved = column_drag.is_some_and(|drag| drag.moved);
+        if column_moved {
+            self.last_column_click = None;
         }
-        split_moved || column_moved
+        let still_click = column_drag.filter(|drag| !drag.moved).zip(click_at);
+        if let Some((drag, at)) = still_click {
+            match drag.click_sort {
+                Some(column) => {
+                    self.last_column_click = None;
+                    self.change_card_sort(drag.card, SortChange::SelectColumn(column));
+                }
+                None => self.last_column_click = Some((drag.card, drag.column, at)),
+            }
+        }
+        let tab_moved = self.finish_tab_drag();
+        split_moved || column_moved || tab_moved
     }
 
     // 2. 종료 확인 버튼 -------------------------------------------------------
@@ -352,7 +361,8 @@ impl AppState {
             return UiCommand::None;
         }
 
-        // 5. 열 경계 잡기: 머리글 정렬보다 우선, 끌지 않고 뗀 직후 다시 누르면 자동 폭 복원
+        // 5. 열 경계 잡기: 머리글 정렬보다 우선, 경계 칸을 끌지 않고 뗀 직후 다시 누르면 자동 폭 복원
+        // 경계 옆 머리글 칸은 끌면 열 폭, 끌지 않고 떼면 그 열 정렬 (떼는 순간 end_drags 가 처리)
         self.column_drag = None;
         let column_hit = self
             .hit_areas
@@ -362,11 +372,18 @@ impl AppState {
             .copied();
         if let Some(hit) = column_hit {
             self.focused_card = Some((self.tab, hit.card));
-            let double_click = self.last_column_click.is_some_and(|(card, column, at)| {
-                card == hit.card
-                    && column == hit.column
-                    && now.saturating_duration_since(at) < DOUBLE_CLICK_WINDOW
-            });
+            let click_sort = self
+                .hit_areas
+                .header_cells
+                .iter()
+                .find(|header| header.rect.contains(position))
+                .map(|header| header.column);
+            let double_click = click_sort.is_none()
+                && self.last_column_click.is_some_and(|(card, column, at)| {
+                    card == hit.card
+                        && column == hit.column
+                        && now.saturating_duration_since(at) < DOUBLE_CLICK_WINDOW
+                });
             self.last_column_click = None;
             if double_click {
                 self.column_widths[hit.card as usize] = [None; MAX_TABLE_COLUMNS];
@@ -379,9 +396,12 @@ impl AppState {
                 start_x: position.x,
                 start_width: hit.width,
                 moved: false,
+                click_sort,
             });
             self.column_hover = Some((hit.card, hit.column));
-            self.show_toast(i18n::text(self.lang, Msg::ToastColumnDrag), ToastLevel::Info);
+            if click_sort.is_none() {
+                self.show_toast(i18n::text(self.lang, Msg::ToastColumnDrag), ToastLevel::Info);
+            }
             return UiCommand::None;
         }
 
@@ -407,7 +427,7 @@ impl AppState {
             return self.perform_action(action);
         }
 
-        // 8. 탭 전환
+        // 8. 탭 전환, 누른 채 끄면 탭 순서 이동 (놓을 때 end_drags 가 확정)
         let tab = self
             .hit_areas
             .tab_rects
@@ -415,7 +435,12 @@ impl AppState {
             .find(|(_, rect)| rect.contains(position))
             .map(|(tab, _)| *tab);
         if let Some(tab) = tab {
-            return self.switch_tab(tab);
+            let command = self.switch_tab(tab);
+            self.tab_drag = Some(TabDrag {
+                tab,
+                baseline: self.tab_order,
+            });
+            return command;
         }
 
         // 9. 표 머리글 클릭 정렬 (숫자·시간 내림 -> 오름, 문자 오름 -> 내림, 세 번째 기본, 선택 행은 같은 항목을 따라감)
@@ -478,7 +503,7 @@ impl AppState {
     pub fn handle_resize(&mut self, width: u16, height: u16) -> UiCommand {
         self.apply_screen_size(width, height);
         self.cancel_card_move();
-        let drag_moved = self.end_pointer_drags(self.now);
+        let drag_moved = self.end_drags(None);
         self.last_column_click = None;
         self.split_hover = None;
         self.column_hover = None;
@@ -489,118 +514,5 @@ impl AppState {
         } else {
             UiCommand::None
         }
-    }
-
-    // 10. 길게 누름 시계 ------------------------------------------------------
-    // 제목을 누른 지 CARD_HOLD_TIME 이 지나면 이동 모드 진입 (마우스 움직임과 무관), 반환 = 상태가 바뀌었는지
-    pub fn tick(&mut self, now: Instant) -> bool {
-        let Some(press) = self.card_press else {
-            return false;
-        };
-        if now.saturating_duration_since(press.started) < CARD_HOLD_TIME {
-            return false;
-        }
-        self.card_press = None;
-        let Some(slot) = self.card_layout.slot_of(press.group, press.index) else {
-            return false;
-        };
-        self.card_move = Some(CardMove {
-            card: press.card,
-            group: press.group,
-            index: press.index,
-            baseline: self.card_layout.order_of(press.group),
-            target: slot,
-        });
-        true
-    }
-
-    // 이동 모드 진입까지 남은 시간 (이벤트 대기 시간 상한 계산용), 대기 중이 아니면 None
-    pub fn press_remaining(&self, now: Instant) -> Option<Duration> {
-        self.card_press.map(|press| {
-            CARD_HOLD_TIME.saturating_sub(now.saturating_duration_since(press.started))
-        })
-    }
-
-    // 11. 카드 이동 취소·미리보기·확정 ----------------------------------------
-    // 대기 중 누름은 버리고, 이동 중이면 누르기 전 순서로 복원, 반환 = 상태가 바뀌었는지
-    pub fn cancel_card_move(&mut self) -> bool {
-        let pressed = self.card_press.take().is_some();
-        match self.card_move.take() {
-            Some(moving) => {
-                self.card_layout.set_order(moving.group, moving.baseline);
-                true
-            }
-            None => pressed,
-        }
-    }
-
-    // 포인터가 놓인 칸을 목표로 삼아 누르기 전 순서에서 삽입 이동을 다시 계산, 칸 밖이면 마지막 목표 유지
-    pub fn preview_card_move(&mut self, position: Position) {
-        let Some(moving) = self.card_move else {
-            return;
-        };
-        let target = self
-            .hit_areas
-            .slot_groups
-            .iter()
-            .find(|slots| slots.group == moving.group)
-            .and_then(|slots| slots.slots.iter().position(|slot| slot.contains(position)));
-        let Some(target) = target else {
-            return;
-        };
-        if target == moving.target {
-            return;
-        }
-        self.card_layout
-            .move_card_to_slot(moving.group, &moving.baseline, moving.index, target);
-        self.card_move = Some(CardMove { target, ..moving });
-    }
-
-    // 순서가 바뀌었을 때만 알림과 저장 요청 (제자리에 놓으면 아무 일 없음)
-    pub fn commit_card_move(&mut self) -> UiCommand {
-        let Some(moving) = self.card_move.take() else {
-            return UiCommand::None;
-        };
-        if self.card_layout.order_of(moving.group) == moving.baseline {
-            return UiCommand::None;
-        }
-        self.show_toast(i18n::text(self.lang, Msg::ToastCardMoved), ToastLevel::Info);
-        UiCommand::SaveState
-    }
-
-    // 12. Shift+방향키 한 칸 이동 ---------------------------------------------
-    // 세로 나열 그룹은 ↑↓, 가로 나열 그룹은 ←→ 만 받고 나머지는 무시, 바로 확정·저장
-    // 이번 프레임에 그려진 그룹만 대상 (안내 카드만 보이는 탭은 순서를 바꾸지 않음)
-    pub fn shift_focused_card(&mut self, card: CardId, code: KeyCode) -> UiCommand {
-        let Some((group, index)) = card.reorder_slot(self.tab) else {
-            return UiCommand::None;
-        };
-        if !self
-            .hit_areas
-            .slot_groups
-            .iter()
-            .any(|slots| slots.group == group)
-        {
-            return UiCommand::None;
-        }
-        let delta: isize = match (group.axis(), code) {
-            (SplitAxis::Rows, KeyCode::Up) | (SplitAxis::Columns, KeyCode::Left) => -1,
-            (SplitAxis::Rows, KeyCode::Down) | (SplitAxis::Columns, KeyCode::Right) => 1,
-            _ => return UiCommand::None,
-        };
-        let Some(slot) = self.card_layout.slot_of(group, index) else {
-            return UiCommand::None;
-        };
-        let Some(target) = slot
-            .checked_add_signed(delta)
-            .filter(|target| *target < group.card_count())
-        else {
-            return UiCommand::None;
-        };
-        let baseline = self.card_layout.order_of(group);
-        self.card_layout
-            .move_card_to_slot(group, &baseline, index, target);
-        self.show_toast(i18n::text(self.lang, Msg::ToastCardMoved), ToastLevel::Info);
-        UiCommand::SaveState
     }
 }

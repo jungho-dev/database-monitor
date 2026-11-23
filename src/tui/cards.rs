@@ -181,7 +181,8 @@ pub const MAX_TABLE_COLUMNS: usize = 12;
 pub const MAX_COLUMN_WIDTH: u16 = 512;
 
 // 표 머리글 두 칸 사이 경계 (column = 왼쪽 열 번호, width = 그릴 때 왼쪽 열 폭)
-// grab = 잡는 칸 (머리글 행의 열 사이 한 칸), line = 끄는 동안 그리는 세로선
+// grab = 잡는 칸 (머리글 행의 경계 칸과 양옆 열이 최소 폭보다 넓으면 그 열 쪽 한 칸씩)
+// line = 경계 칸 세로선 영역 (머리글과 그려진 본문 행 높이, x = 경계 칸)
 // min·max = 끌어서 정할 수 있는 왼쪽 열 폭 범위
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnHit {
@@ -195,6 +196,7 @@ pub struct ColumnHit {
 }
 
 // 진행 중 열 경계 드래그 (start_x·start_width = 누른 순간 포인터 열과 왼쪽 열 폭, moved = 실제로 끌었는지)
+// click_sort = 경계 옆 머리글 칸을 눌렀을 때 그 열 번호 (끌지 않고 떼면 정렬)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColumnDrag {
     pub card: CardId,
@@ -202,6 +204,7 @@ pub struct ColumnDrag {
     pub start_x: u16,
     pub start_width: u16,
     pub moved: bool,
+    pub click_sort: Option<usize>,
 }
 
 // 카드 제목 글자(` 제목 ` 구간, 위 테두리 위): 길게 누르면 카드 이동

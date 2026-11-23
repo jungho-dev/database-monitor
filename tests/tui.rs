@@ -19,7 +19,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Span;
 use database_monitor::app::model::{MonitorSnapshot, RiskLevel, RiskReason};
-use database_monitor::tui::cards::{CARD_HOLD_TIME, CardId, UiAction, scroll_thumb};
+use database_monitor::tui::cards::{CARD_HOLD_TIME, CardId, ColumnHit, UiAction, scroll_thumb};
 use database_monitor::tui::i18n::{self, Lang, Msg, reason_text, text};
 use database_monitor::tui::layout::SplitGroup;
 use database_monitor::tui::sort::{self, SortKey, SortTable};
@@ -785,7 +785,7 @@ fn header_click_cycles_numeric_descending_first_text_ascending_first_then_resets
 
     // 1. 숫자 열: 내림차순 -> 오름차순 -> 기본 순위
     let default_counts = counts(&state);
-    click_at(&mut state, hit.rect.x, hit.rect.y);
+    click_at(&mut state, hit.rect.x + hit.rect.width / 2, hit.rect.y);
     assert_eq!(state.sorts.get(SortTable::TopSql), Some(SortKey { column: 3, descending: true }));
     assert!(counts(&state).windows(2).all(|pair| pair[0] >= pair[1]));
     let buffer = draw(&mut state, 160, 45);
@@ -796,27 +796,27 @@ fn header_click_cycles_numeric_descending_first_text_ascending_first_then_resets
     assert_eq!(header_cell.symbol(), "↓");
     assert_eq!(header_cell.fg, Color::Indexed(81));
 
-    click_at(&mut state, hit.rect.x, hit.rect.y);
+    click_at(&mut state, hit.rect.x + hit.rect.width / 2, hit.rect.y);
     assert_eq!(state.sorts.get(SortTable::TopSql), Some(SortKey { column: 3, descending: false }));
     assert!(counts(&state).windows(2).all(|pair| pair[0] <= pair[1]));
     assert!(title_row(&draw(&mut state, 160, 45)).contains("· Sort Executions↑"));
 
-    click_at(&mut state, hit.rect.x, hit.rect.y);
+    click_at(&mut state, hit.rect.x + hit.rect.width / 2, hit.rect.y);
     assert_eq!(state.sorts.get(SortTable::TopSql), None);
     assert_eq!(counts(&state), default_counts);
     assert!(!title_row(&draw(&mut state, 160, 45)).contains("Sort"));
 
     // 2. 문자 열(작업, 1열): 오름차순 -> 내림차순 -> 기본 순위
     let op = header(&state, 1);
-    click_at(&mut state, op.rect.x, op.rect.y);
+    click_at(&mut state, op.rect.x + op.rect.width / 2, op.rect.y);
     assert_eq!(state.sorts.get(SortTable::TopSql), Some(SortKey { column: 1, descending: false }));
-    click_at(&mut state, op.rect.x, op.rect.y);
+    click_at(&mut state, op.rect.x + op.rect.width / 2, op.rect.y);
     assert_eq!(state.sorts.get(SortTable::TopSql), Some(SortKey { column: 1, descending: true }));
-    click_at(&mut state, op.rect.x, op.rect.y);
+    click_at(&mut state, op.rect.x + op.rect.width / 2, op.rect.y);
     assert_eq!(state.sorts.get(SortTable::TopSql), None);
 
     // 3. 한국어 제목: 정렬 키는 열 번호라 언어를 바꿔도 순서가 그대로
-    click_at(&mut state, hit.rect.x, hit.rect.y);
+    click_at(&mut state, hit.rect.x + hit.rect.width / 2, hit.rect.y);
     let numeric_order = counts(&state);
     state.lang = Lang::Ko;
     let buffer = draw(&mut state, 160, 45);
@@ -889,14 +889,15 @@ fn dragging_a_header_boundary_sets_the_width_double_click_resets_it_and_l_clears
     let base = Instant::now();
 
     // 1. 끌기: 폭 + 이동량, 놓으면 저장 요청
-    press_at(&mut state, grab.grab.x, grab.grab.y, base);
-    drag_at(&mut state, grab.grab.x + 4, grab.grab.y, after(base, 20));
-    let command = release_at(&mut state, grab.grab.x + 4, grab.grab.y, after(base, 40));
+    press_at(&mut state, grab.line.x, grab.grab.y, base);
+    drag_at(&mut state, grab.line.x + 4, grab.grab.y, after(base, 20));
+    let command = release_at(&mut state, grab.line.x + 4, grab.grab.y, after(base, 40));
     assert!(matches!(command, UiCommand::SaveState));
     assert_eq!(
         state.column_widths[CardId::Processes as usize][2],
         Some(grab.width + 4)
     );
+    state.handle_mouse_event_at(mouse(MouseEventKind::Moved, 0, 0), after(base, 50));
     let buffer = draw(&mut state, 130, 40);
     let moved = state
         .hit_areas
@@ -906,17 +907,17 @@ fn dragging_a_header_boundary_sets_the_width_double_click_resets_it_and_l_clears
         .copied()
         .unwrap();
     assert_eq!(moved.width, grab.width + 4);
-    assert_eq!(moved.grab.x, grab.grab.x + 4);
+    assert_eq!(moved.line.x, grab.line.x + 4);
 
     // 2. 끄는 동안 세로 손잡이는 표 높이 전체, 평소에는 없음
-    let idle_cell = &buffer[(moved.grab.x, moved.grab.y + 3)];
+    let idle_cell = &buffer[(moved.line.x, moved.grab.y + 3)];
     assert_ne!(idle_cell.symbol(), "┃");
-    press_at(&mut state, moved.grab.x, moved.grab.y, after(base, 2_000));
-    drag_at(&mut state, moved.grab.x + 1, moved.grab.y, after(base, 2_010));
+    press_at(&mut state, moved.line.x, moved.grab.y, after(base, 2_000));
+    drag_at(&mut state, moved.line.x + 1, moved.grab.y, after(base, 2_010));
     let buffer = draw(&mut state, 130, 40);
-    assert_eq!(buffer[(moved.grab.x + 1, moved.grab.y + 3)].symbol(), "┃");
-    assert_eq!(buffer[(moved.grab.x + 1, moved.grab.y + 3)].fg, Color::Indexed(231));
-    release_at(&mut state, moved.grab.x + 1, moved.grab.y, after(base, 2_020));
+    assert_eq!(buffer[(moved.line.x + 1, moved.grab.y + 3)].symbol(), "┃");
+    assert_eq!(buffer[(moved.line.x + 1, moved.grab.y + 3)].fg, Color::Indexed(231));
+    release_at(&mut state, moved.line.x + 1, moved.grab.y, after(base, 2_020));
 
     // 3. 더블클릭(500ms 안): 자동 폭 복원
     draw(&mut state, 130, 40);
@@ -927,18 +928,18 @@ fn dragging_a_header_boundary_sets_the_width_double_click_resets_it_and_l_clears
         .find(|hit| hit.card == CardId::Processes && hit.column == 2)
         .copied()
         .unwrap();
-    press_at(&mut state, boundary.grab.x, boundary.grab.y, after(base, 5_000));
-    release_at(&mut state, boundary.grab.x, boundary.grab.y, after(base, 5_050));
-    let command = press_at(&mut state, boundary.grab.x, boundary.grab.y, after(base, 5_300));
+    press_at(&mut state, boundary.line.x, boundary.grab.y, after(base, 5_000));
+    release_at(&mut state, boundary.line.x, boundary.grab.y, after(base, 5_050));
+    let command = press_at(&mut state, boundary.line.x, boundary.grab.y, after(base, 5_300));
     assert!(matches!(command, UiCommand::SaveState));
     assert!(state.column_widths[CardId::Processes as usize].iter().all(Option::is_none));
 
     // 4. 500ms 넘으면 더블클릭 아님
     draw(&mut state, 130, 40);
     state.column_widths[CardId::Processes as usize][2] = Some(20);
-    press_at(&mut state, boundary.grab.x, boundary.grab.y, after(base, 8_000));
-    release_at(&mut state, boundary.grab.x, boundary.grab.y, after(base, 8_050));
-    press_at(&mut state, boundary.grab.x, boundary.grab.y, after(base, 8_700));
+    press_at(&mut state, boundary.line.x, boundary.grab.y, after(base, 8_000));
+    release_at(&mut state, boundary.line.x, boundary.grab.y, after(base, 8_050));
+    press_at(&mut state, boundary.line.x, boundary.grab.y, after(base, 8_700));
     assert_eq!(state.column_widths[CardId::Processes as usize][2], Some(20));
 
     // 5. l: 열 폭·카드 크기·순서 복원, 언어 유지
@@ -1822,7 +1823,7 @@ fn indexed_colors_live_only_in_theme_and_view_modules_hold_no_inline_korean_text
         }
 
         // 2. 화면 문구는 카탈로그: 뷰·상태·상호작용·카드 모듈의 코드 줄에는 한글 리터럴이 없음
-        if in_views || matches!(name.as_str(), "state.rs" | "interaction.rs" | "cards.rs") {
+        if in_views || matches!(name.as_str(), "state.rs" | "mouse.rs" | "card_move.rs" | "cards.rs") {
             for (index, line) in production.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or("");
                 assert!(!has_hangul(code), "{}:{} 한글 리터럴: {line}", path.display(), index + 1);
@@ -2128,14 +2129,14 @@ fn lost_release_ends_split_column_and_scroll_drags_on_a_buttonless_move_with_an_
         .find(|hit| hit.card == CardId::Processes && hit.column == 2)
         .copied()
         .unwrap();
-    press_at(&mut state, grab.grab.x, grab.grab.y, base);
-    drag_at(&mut state, grab.grab.x + 4, grab.grab.y, after(base, 20));
+    press_at(&mut state, grab.line.x, grab.grab.y, base);
+    drag_at(&mut state, grab.line.x + 4, grab.grab.y, after(base, 20));
     assert!(state.column_drag.is_some_and(|drag| drag.moved));
-    let command = state.handle_mouse_event_at(moved_event(grab.grab.x + 5, grab.grab.y), after(base, 40));
+    let command = state.handle_mouse_event_at(moved_event(grab.line.x + 5, grab.grab.y), after(base, 40));
     assert!(matches!(command, UiCommand::SaveState));
     assert!(state.column_drag.is_none());
     assert_eq!(state.column_widths[CardId::Processes as usize][2], Some(grab.width + 4));
-    drag_at(&mut state, grab.grab.x + 9, grab.grab.y, after(base, 60));
+    drag_at(&mut state, grab.line.x + 9, grab.grab.y, after(base, 60));
     assert_eq!(state.column_widths[CardId::Processes as usize][2], Some(grab.width + 4));
 
     // 3. 스크롤바: 썸 드래그는 버튼 없는 움직임에서 끝남 (저장할 것 없음), 이후 드래그는 스크롤을 바꾸지 못함
@@ -2222,16 +2223,192 @@ fn a_new_press_resets_every_drag_state_first_and_a_tab_switch_commits_a_moved_dr
         .find(|hit| hit.card == CardId::Processes && hit.column == 2)
         .copied()
         .unwrap();
-    press_at(&mut state, grab.grab.x, grab.grab.y, base);
-    drag_at(&mut state, grab.grab.x + 3, grab.grab.y, after(base, 20));
+    press_at(&mut state, grab.line.x, grab.grab.y, base);
+    drag_at(&mut state, grab.line.x + 3, grab.grab.y, after(base, 20));
     let command = state.switch_tab(ActiveTab::Alerts);
     assert!(matches!(command, UiCommand::SaveState));
     assert!(state.column_drag.is_none() && state.tab == ActiveTab::Alerts);
     assert_eq!(state.column_widths[CardId::Processes as usize][2], Some(grab.width + 3));
     let mut state = state_with(calm_snapshot(5), ActiveTab::Processes, Lang::En);
     draw(&mut state, 130, 40);
-    press_at(&mut state, grab.grab.x, grab.grab.y, base);
+    press_at(&mut state, grab.line.x, grab.grab.y, base);
     let command = state.handle_key_event(key(KeyCode::Char('1')));
     assert!(matches!(command, UiCommand::None));
     assert!(state.column_drag.is_none() && state.tab == ActiveTab::Overview);
+}
+
+// 35. 열 경계 잡기 영역·손잡이 ------------------------------------------------
+// 이웃 머리글 칸(경계 왼쪽 한 칸) 좌표, 옆 열이 최소 폭이면 잡는 칸이 넓어지지 않아 없음
+fn processes_boundary(state: &AppState) -> ColumnHit {
+    state
+        .hit_areas
+        .column_hits
+        .iter()
+        .find(|hit| hit.card == CardId::Processes && hit.grab.x < hit.line.x && hit.grab.right() > hit.line.x + 1)
+        .copied()
+        .expect("양옆으로 넓은 프로세스 열 경계")
+}
+
+fn header_column_at(state: &AppState, x: u16, y: u16) -> usize {
+    state
+        .hit_areas
+        .header_cells
+        .iter()
+        .find(|hit| hit.rect.contains(ratatui::layout::Position::new(x, y)))
+        .map(|hit| hit.column)
+        .unwrap_or_else(|| panic!("({x},{y}) 머리글 칸 아님"))
+}
+
+#[test]
+fn column_boundaries_show_a_faint_mark_at_rest_and_a_full_height_grip_from_every_grab_cell_and_while_dragging() {
+    let base = Instant::now();
+    for lang in [Lang::En, Lang::Ko] {
+        for tab in ActiveTab::ALL {
+            for (width, height) in SIZES {
+                let label = format!("{lang:?} {tab:?} {width}x{height}");
+                let mut state = state_with(calm_snapshot(5), tab, lang);
+                let buffer = draw(&mut state, width, height);
+                let hits = state.hit_areas.column_hits.clone();
+
+                // 1. 평소: 모든 경계의 머리글 칸은 흐린 │ 243, 잡는 칸은 머리글 한 행 1-3칸, 세로선은 머리글 + 그려진 본문 행
+                for hit in &hits {
+                    let case = format!("{label} {:?} {}", hit.card, hit.column);
+                    let cell = &buffer[(hit.line.x, hit.line.y)];
+                    assert_eq!(cell.symbol(), "│", "{case}");
+                    assert_eq!(cell.fg, Color::Indexed(243), "{case}");
+                    assert!((1..=3).contains(&hit.grab.width), "{case} {:?}", hit.grab);
+                    assert_eq!((hit.grab.y, hit.grab.height), (hit.line.y, 1), "{case}");
+                    assert!(hit.grab.x <= hit.line.x && hit.line.x < hit.grab.right(), "{case}");
+                    let view = &state.card_views[hit.card as usize];
+                    let drawn_rows = view.total.saturating_sub(view.scroll).min(view.visible) as u16;
+                    assert_eq!(hit.line.height, 1 + drawn_rows, "{case}");
+                }
+                for (index, hit) in hits.iter().enumerate() {
+                    for other in hits[index + 1..].iter().filter(|other| other.card == hit.card) {
+                        assert!(hit.grab.intersection(other.grab).is_empty(), "{label} {:?} 잡는 칸 겹침", hit.card);
+                    }
+                }
+
+                // 2. 호버: 잡는 칸 어느 칸에서든 세로선 전체가 ┃ 250, 그 아래 행에는 없음
+                for hit in &hits {
+                    for x in hit.grab.x..hit.grab.right() {
+                        let case = format!("{label} {:?} {} x={x}", hit.card, hit.column);
+                        state.handle_mouse_event_at(mouse(MouseEventKind::Moved, x, hit.grab.y), base);
+                        assert_eq!(state.column_hover, Some((hit.card, hit.column)), "{case}");
+                        let buffer = draw(&mut state, width, height);
+                        for y in hit.line.y..hit.line.bottom() {
+                            assert_eq!(buffer[(hit.line.x, y)].symbol(), "┃", "{case} y={y}");
+                            assert_eq!(buffer[(hit.line.x, y)].fg, Color::Indexed(250), "{case} y={y}");
+                        }
+                        assert_ne!(buffer[(hit.line.x, hit.line.bottom())].symbol(), "┃", "{case} 아래 행");
+                    }
+                }
+                state.handle_mouse_event_at(mouse(MouseEventKind::Moved, 0, 0), base);
+
+                // 3. 끌기: 세로선 전체가 ┃ 231
+                let Some(first) = hits.first().copied() else {
+                    continue;
+                };
+                press_at(&mut state, first.line.x, first.line.y, after(base, 10));
+                drag_at(&mut state, first.line.x + 1, first.line.y, after(base, 20));
+                let buffer = draw(&mut state, width, height);
+                let dragged = state
+                    .hit_areas
+                    .column_hits
+                    .iter()
+                    .find(|hit| hit.card == first.card && hit.column == first.column)
+                    .copied()
+                    .unwrap_or_else(|| panic!("{label} 끌던 경계"));
+                for y in dragged.line.y..dragged.line.bottom() {
+                    assert_eq!(buffer[(dragged.line.x, y)].symbol(), "┃", "{label} 끌기 y={y}");
+                    assert_eq!(buffer[(dragged.line.x, y)].fg, Color::Indexed(231), "{label} 끌기 y={y}");
+                }
+                release_at(&mut state, first.line.x + 1, first.line.y, after(base, 30));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_still_click_on_a_neighbor_header_cell_sorts_that_column_and_a_drag_from_it_only_resizes() {
+    let base = Instant::now();
+
+    // 1. 왼쪽 이웃 머리글 칸: 누르고 움직이지 않고 떼면 그 열 정렬, 폭은 그대로
+    let mut state = state_with(calm_snapshot(5), ActiveTab::Processes, Lang::En);
+    draw(&mut state, 130, 40);
+    let hit = processes_boundary(&state);
+    let left_x = hit.line.x - 1;
+    let left_column = header_column_at(&state, left_x, hit.grab.y);
+    assert_eq!(left_column, hit.column);
+    press_at(&mut state, left_x, hit.grab.y, base);
+    assert!(state.column_drag.is_some_and(|drag| drag.click_sort == Some(left_column)));
+    let command = release_at(&mut state, left_x, hit.grab.y, after(base, 10));
+    assert!(matches!(command, UiCommand::None));
+    assert_eq!(state.sorts.get(SortTable::Processes).map(|key| key.column), Some(left_column));
+    assert!(state.column_widths[CardId::Processes as usize].iter().all(Option::is_none));
+
+    // 2. 오른쪽 이웃 머리글 칸: 놓기를 놓친 버튼 없는 움직임도 같은 정렬 클릭
+    let mut state = state_with(calm_snapshot(5), ActiveTab::Processes, Lang::En);
+    draw(&mut state, 130, 40);
+    let right_x = hit.line.x + 1;
+    let right_column = header_column_at(&state, right_x, hit.grab.y);
+    press_at(&mut state, right_x, hit.grab.y, base);
+    let command = state.handle_mouse_event_at(mouse(MouseEventKind::Moved, right_x, hit.grab.y), after(base, 10));
+    assert!(matches!(command, UiCommand::None));
+    assert_eq!(state.sorts.get(SortTable::Processes).map(|key| key.column), Some(right_column));
+
+    // 3. 이웃 머리글 칸에서 끌면 폭만 바뀜, 정렬은 그대로
+    let mut state = state_with(calm_snapshot(5), ActiveTab::Processes, Lang::En);
+    draw(&mut state, 130, 40);
+    press_at(&mut state, left_x, hit.grab.y, base);
+    drag_at(&mut state, left_x + 3, hit.grab.y, after(base, 10));
+    let command = release_at(&mut state, left_x + 3, hit.grab.y, after(base, 20));
+    assert!(matches!(command, UiCommand::SaveState));
+    assert_eq!(state.column_widths[CardId::Processes as usize][hit.column], Some(hit.width + 3));
+    assert_eq!(state.sorts.get(SortTable::Processes), None);
+}
+
+#[test]
+fn a_quick_second_press_restores_auto_widths_only_on_the_boundary_cell_and_never_on_a_neighbor_header() {
+    let base = Instant::now();
+    let mut state = state_with(calm_snapshot(5), ActiveTab::Processes, Lang::En);
+    draw(&mut state, 130, 40);
+    let first = processes_boundary(&state);
+    state.column_widths[CardId::Processes as usize][first.column] = Some(first.width + 2);
+    draw(&mut state, 130, 40);
+    let hit = processes_boundary(&state);
+
+    // 1. 이웃 머리글 칸 빠른 두 번 누름: 복원 없음 (두 번의 정렬 클릭)
+    let left_x = hit.line.x - 1;
+    press_at(&mut state, left_x, hit.grab.y, base);
+    release_at(&mut state, left_x, hit.grab.y, after(base, 10));
+    let command = press_at(&mut state, left_x, hit.grab.y, after(base, 200));
+    assert!(matches!(command, UiCommand::None));
+    release_at(&mut state, left_x, hit.grab.y, after(base, 210));
+    assert_eq!(state.column_widths[CardId::Processes as usize][hit.column], Some(first.width + 2));
+
+    // 2. 경계 칸 빠른 두 번 누름: 자동 폭 복원
+    draw(&mut state, 130, 40);
+    let hit = processes_boundary(&state);
+    press_at(&mut state, hit.line.x, hit.grab.y, after(base, 1_000));
+    release_at(&mut state, hit.line.x, hit.grab.y, after(base, 1_010));
+    let command = press_at(&mut state, hit.line.x, hit.grab.y, after(base, 1_200));
+    assert!(matches!(command, UiCommand::SaveState));
+    assert!(state.column_widths[CardId::Processes as usize].iter().all(Option::is_none));
+}
+
+#[test]
+fn no_tab_draws_markdown_pipe_table_rows_at_the_size_matrix_in_both_languages() {
+    for lang in [Lang::En, Lang::Ko] {
+        for tab in ActiveTab::ALL {
+            for (width, height) in SIZES {
+                let mut state = state_with(calm_snapshot(5), tab, lang);
+                for row in dump(&draw(&mut state, width, height)) {
+                    let trimmed = row.trim();
+                    let pipe_row = trimmed.starts_with("| ") && trimmed.ends_with(" |");
+                    assert!(!row.contains("|---") && !pipe_row, "{lang:?} {tab:?} {width}x{height}: {row}");
+                }
+            }
+        }
+    }
 }

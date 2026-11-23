@@ -11,7 +11,7 @@ use crate::app::config::TUI_STATE_FILE_NAME;
 use crate::tui::cards::{CARD_COUNT, CardId, MAX_COLUMN_WIDTH, MAX_TABLE_COLUMNS};
 use crate::tui::i18n::{self, Lang, StateIssue};
 use crate::tui::layout::{CardLayout, SplitGroup};
-use crate::tui::state::{AppState, ToastLevel};
+use crate::tui::state::{ActiveTab, AppState, TAB_COUNT, ToastLevel};
 use crate::tui::state_writer::StateSave;
 
 const LAYOUT_VERSION: i64 = 1;
@@ -29,6 +29,8 @@ struct LayoutFile {
     version: i64,
     #[serde(default)]
     language: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tab_order: Option<toml::Value>,
     #[serde(default)]
     orders: BTreeMap<String, Vec<i64>>,
     #[serde(default)]
@@ -50,12 +52,20 @@ fn build_layout_file(
     layout: &CardLayout,
     column_widths: &[[Option<u16>; MAX_TABLE_COLUMNS]; CARD_COUNT],
     lang: Lang,
+    tab_order: &[ActiveTab; TAB_COUNT],
 ) -> LayoutFile {
     let mut file = LayoutFile {
         version: LAYOUT_VERSION,
         language: Some(toml::Value::String(lang.code().to_string())),
         ..LayoutFile::default()
     };
+    if *tab_order != ActiveTab::ALL {
+        let keys = tab_order
+            .iter()
+            .map(|tab| toml::Value::String(tab.tab_key().to_string()))
+            .collect();
+        file.tab_order = Some(toml::Value::Array(keys));
+    }
     for group in SplitGroup::ALL {
         if let Some(order) = layout.custom_order(group) {
             let values = order.iter().map(|card| i64::from(*card)).collect();
@@ -138,6 +148,22 @@ fn apply_layout_file(
         }
     }
     skipped
+}
+
+// 탭 순서 값 -> 네 탭을 겹침 없이 모두 담은 순서 (배열이 아니거나 모르는 이름·중복·개수 불일치면 None)
+fn parse_tab_order(value: &toml::Value) -> Option<[ActiveTab; TAB_COUNT]> {
+    let keys = value.as_array()?;
+    let mut tabs: Vec<ActiveTab> = Vec::with_capacity(keys.len());
+    for key in keys {
+        let name = key.as_str()?;
+        let tab = ActiveTab::ALL.into_iter().find(|tab| tab.tab_key() == name)?;
+        tabs.push(tab);
+    }
+    let order = <[ActiveTab; TAB_COUNT]>::try_from(tabs).ok()?;
+    ActiveTab::ALL
+        .iter()
+        .all(|tab| order.contains(tab))
+        .then_some(order)
 }
 
 // 4. 파일 읽기·쓰기 -----------------------------------------------------------
@@ -284,6 +310,12 @@ impl AppState {
                     Some(Some(lang)) => self.lang = lang,
                     Some(None) => skipped += 1,
                 }
+                // 탭 순서는 고정 이름을 겹침 없이 모두 담은 배열만 복원
+                match file.tab_order.as_ref().map(parse_tab_order) {
+                    None => {}
+                    Some(Some(order)) => self.tab_order = order,
+                    Some(None) => skipped += 1,
+                }
                 if skipped > 0 {
                     self.show_toast(
                         &i18n::state_entries_skipped(self.lang, TUI_STATE_FILE_NAME, skipped),
@@ -301,7 +333,12 @@ impl AppState {
         let Some(path) = self.state_file.clone() else {
             return Ok(None);
         };
-        let file = build_layout_file(&self.card_layout, &self.column_widths, self.lang);
+        let file = build_layout_file(
+            &self.card_layout,
+            &self.column_widths,
+            self.lang,
+            &self.tab_order,
+        );
         toml::to_string(&file)
             .map(|text| Some(StateSave { path, text }))
             .map_err(|error| error.to_string())
@@ -621,6 +658,77 @@ language = \"en\"
         assert!(state.toast.is_none(), "{:?}", state.toast);
         assert_eq!(state.lang, Lang::En);
         assert_eq!(state.card_layout, CardLayout::default());
+    }
+
+    // 16. 탭 순서 저장 왕복
+    #[test]
+    fn tab_order_round_trips_by_stable_names_and_the_default_order_is_not_written() {
+        let dir = TempDir::new().unwrap();
+        let mut state = state_in(&dir);
+        state.save_tui_state();
+        let text = fs::read_to_string(dir.path().join(TUI_STATE_FILE_NAME)).unwrap();
+        assert!(!text.contains("tab_order"), "{text}");
+
+        // 바꾼 순서는 최상위 이름 배열로 표보다 앞에 기록
+        state.tab_order.swap(0, 1);
+        customize(&mut state);
+        state.save_tui_state();
+        let text = fs::read_to_string(dir.path().join(TUI_STATE_FILE_NAME)).unwrap();
+        let expected = "tab_order = [\"processes\", \"overview\", \"top_sql\", \"alerts\"]\n";
+        assert!(text.contains(expected), "{text}");
+        assert!(text.find("tab_order") < text.find("[orders]"), "{text}");
+
+        let mut loaded = state_in(&dir);
+        loaded.load_tui_state();
+        assert!(loaded.toast.is_none(), "{:?}", loaded.toast);
+        assert_eq!(loaded.tab_order, state.tab_order);
+    }
+
+    // 17. 잘못된 탭 순서
+    #[test]
+    fn broken_tab_order_values_are_skipped_and_the_default_order_stays() {
+        for broken in [
+            "[\"overview\", \"overview\", \"top_sql\", \"alerts\"]",
+            "[\"overview\", \"processes\", \"top_sql\"]",
+            "[\"overview\", \"processes\", \"top_sql\", \"alerts\", \"alerts\"]",
+            "[\"overview\", \"processes\", \"top_sql\", \"logs\"]",
+            "[1, 2, 3, 4]",
+            "\"overview\"",
+        ] {
+            let dir = TempDir::new().unwrap();
+            fs::write(
+                dir.path().join(TUI_STATE_FILE_NAME),
+                format!("version = 1\ntab_order = {broken}\n"),
+            )
+            .unwrap();
+            let mut state = state_in(&dir);
+            state.load_tui_state();
+            assert_eq!(state.tab_order, ActiveTab::ALL, "{broken}");
+            let toast = state
+                .toast
+                .as_ref()
+                .unwrap_or_else(|| panic!("알림 없음: {broken}"));
+            assert!(toast.text.contains("일부 항목 무시 1건"), "{}", toast.text);
+        }
+    }
+
+    // 18. 배치 초기화 뒤 탭 순서 유지
+    #[test]
+    fn layout_reset_key_keeps_the_tab_order_and_the_saved_file_still_holds_it() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let dir = TempDir::new().unwrap();
+        let mut state = state_in(&dir);
+        state.tab_order.swap(2, 3);
+        let moved = state.tab_order;
+        let command = state.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert!(matches!(command, crate::tui::state::UiCommand::SaveState));
+        assert_eq!(state.tab_order, moved);
+        state.save_tui_state();
+        let text = fs::read_to_string(dir.path().join(TUI_STATE_FILE_NAME)).unwrap();
+        assert!(
+            text.contains("tab_order = [\"overview\", \"processes\", \"alerts\", \"top_sql\"]"),
+            "{text}"
+        );
     }
 
     // 링크 생성 (권한이 없으면 사유와 함께 None)

@@ -1,16 +1,18 @@
 //! mod.rs
 //! ratatui 실시간 관제 화면: 터미널 복원 가드, 이벤트 루프, 실행 요청 전달, 창 최상단·콘솔 글꼴 제어.
 
+pub mod card_move;
 pub mod cards;
 pub mod format;
 pub mod i18n;
-pub mod interaction;
 pub mod layout;
 pub mod layout_store;
+pub mod mouse;
 pub mod poller;
 pub mod sort;
 pub mod state;
 pub mod state_writer;
+pub mod tab_move;
 pub mod theme;
 pub mod views;
 
@@ -205,10 +207,15 @@ fn run_event_loop(
                 }
                 Event::Mouse(mouse_event) => {
                     let hover_before = hover_signature(app);
-                    let arranging_before = app.card_move.is_some() || app.card_press.is_some();
+                    let arranging_before = app.card_move.is_some()
+                        || app.card_press.is_some()
+                        || app.split_drag.is_some()
+                        || app.column_drag.is_some()
+                        || app.scroll_drag.is_some()
+                        || app.tab_drag.is_some();
                     let command = app.handle_mouse_event(mouse_event);
                     dispatch_ui_command(app, command, poll_tx, writer);
-                    // 이동은 강조 대상이 바뀐 때나 카드 이동·길게 누름 중이었을 때(확정·취소 가능)만 다시 그림
+                    // 이동은 강조 대상이 바뀐 때나 카드 이동·길게 누름·끌기 중이었을 때(확정·취소 가능)만 다시 그림
                     let hover_moved = hover_signature(app) != hover_before;
                     if mouse_event.kind != MouseEventKind::Moved || hover_moved || arranging_before {
                         dirty = true;

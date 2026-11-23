@@ -232,7 +232,8 @@ database-monitor --host 192.0.2.10=DEV-DB --ports 3307
 ## TUI Controls
 
 1. **Keys**
-    - `Tab` / `Shift+Tab` / `1` to `4`: switch tabs (`1 Overview`, `2 Agents & Processes`, `3 Top SQL`, `4 Alerts`).
+    - `Tab` / `Shift+Tab` / `1` to `4`: switch tabs (`1 Overview`, `2 Agents & Processes`, `3 Top SQL`, `4 Alerts`); `1` to `4` follow the order shown in the tab bar.
+    - `<` / `>`: move the current tab one slot left or right; the order is saved.
     - `↑` / `↓` / `k` / `j` / `PgUp` / `PgDn` / `Home` / `End`: move the selected row, or scroll the focused card; `k` moves up and `j` moves down like the arrows, and `PgUp` and `PgDn` move one page.
     - `s` / `S`: cycle the sort of the focused table, the same cycle as a header click.
     - `r`: collect now; `Space` / `p`: pause or resume updates.
@@ -248,6 +249,8 @@ database-monitor --host 192.0.2.10=DEV-DB --ports 3307
 2. **Mouse**
     - Click a tab, a footer chip, a card (focus, thick border), or a row (select).
     - Click a column header to sort; drag a header edge to set a column width; double-click the edge for automatic width.
+    - A column edge shows a faint `│` at rest and can be grabbed from one header cell on each side; on hover or drag a `┃` spans the full table height; double-clicking the edge cell restores the automatic width, and clicking the header cell beside it sorts.
+    - Drag a tab to change the tab order; `Esc` cancels.
     - Drag a card border to resize cards; the sizes are kept as ratios.
     - Hold a card title for 400 ms, then drag to move the card with a live preview (dashed border); release to place it, `Esc` to cancel.
     - A button released outside the window is noticed at the next mouse move: it ends a card move, card border drag, column width drag, or scrollbar drag like a release, and a moved drag is saved.
@@ -276,11 +279,12 @@ database-monitor --host 192.0.2.10=DEV-DB --ports 3307
     - `~/.config/database-monitor/tui.toml`, next to `config.toml`; `~` is `USERPROFILE`, or `HOME` when that is unset.
     - When the file is a symbolic link, the link stays and the file it points to is updated; a chain of up to 16 links is followed, and a longer chain or a loop is reported as a save error.
 2. **Content**
-    - `version`, `language`, card orders, split ratios, and column widths; only values that differ from the defaults are written.
+    - `version`, `language`, card orders, split ratios, column widths, and the tab order; only values that differ from the defaults are written.
     - A hand-edited invalid entry is skipped and the rest still apply; column widths are capped at 512 cells.
+    - The tab order is written only when it differs from the default, as `tab_order = ["processes", "overview", "top_sql", "alerts"]`; a value that is not a permutation of the four tabs is skipped, and the `l` reset keeps the tab order.
     - Sort order and the selected row are not saved.
 3. **When it is written**
-    - Only on a committed change: a finished card move, card border drag, or column width drag, the language switch, and the `l` reset.
+    - Only on a committed change: a finished card move, card border drag, column width drag, or tab move (drag or `<` / `>`), the language switch, and the `l` reset.
     - Rendering, hovering, scrolling, sorting, and selecting never write.
     - A writer thread does the write, so the input loop never waits for the disk: requests coalesce (only the latest content per file is written), a failed write shows an error toast, and on quit the last request is written within 5 seconds, with a warning on stderr if the disk stalls longer.
     - The write goes to a temporary file next to the target, is synced, and is renamed over the file.
