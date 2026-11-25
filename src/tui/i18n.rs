@@ -90,6 +90,7 @@ define_messages! {
     ChipRefresh => ("Refresh", "새로고침"),
     ChipResetLayout => ("Reset layout", "배치 초기화"),
     ChipLanguage => ("EN", "KO"),
+    ChipForceRestart => ("Force restart", "강제 재시작"),
     ChipHelp => ("Help", "도움말"),
     ChipQuit => ("Quit", "종료"),
 
@@ -137,6 +138,7 @@ define_messages! {
     HelpResetLayout => ("Reset card size, order, widths (tab)", "현재 탭 카드 크기·순서·열 폭 기본 배치"),
     HelpLanguage => ("Switch language (EN / KO)", "표시 언어 전환 (EN / KO)"),
     HelpToggleHelp => ("Open / close help", "도움말 열기·닫기"),
+    HelpForceRestart => ("New build on disk: rerun on the latest exe", "새 빌드 감지 시 최신 exe 로 강제 재시작"),
     HelpQuit => ("Quit", "종료"),
     HelpKeyClickTab => ("Click / drag tab, chip", "탭·칩 클릭, 탭 드래그"),
     HelpClickTab => ("Switch / reorder tab, run chip action", "탭 전환·순서 변경, 칩 동작 실행"),
@@ -304,6 +306,7 @@ define_messages! {
     ToastNoCritical => ("No critical process to stop", "중단할 위험 프로세스 없음"),
     ToastStateSaved => ("State saved", "상태 저장됨"),
     ToastConfigNone => ("No config file, default ports only", "설정 파일 없음 (기본 감시 포트만 사용)"),
+    ToastExeReplaced => ("New build on disk: press [!] Force restart", "디스크에 새 빌드: 하단 [!] 강제 재시작으로 재실행"),
 }
 
 // 3. 값이 들어가는 문구 -------------------------------------------------------
@@ -544,6 +547,7 @@ pub fn help_rows(lang: Lang) -> Vec<(&'static str, &'static str)> {
         ("l", t(Msg::HelpResetLayout)),
         ("L", t(Msg::HelpLanguage)),
         ("?", t(Msg::HelpToggleHelp)),
+        ("!", t(Msg::HelpForceRestart)),
         ("q / Esc / Ctrl+C", t(Msg::HelpQuit)),
         (t(Msg::HelpSectionMouse), ""),
         (t(Msg::HelpKeyClickTab), t(Msg::HelpClickTab)),

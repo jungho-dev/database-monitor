@@ -56,6 +56,13 @@ const IDLE_REDRAW_INTERVAL: Duration = Duration::from_secs(1);
 // 창 최상단 고정 상태 (종료·panic 복원 경로가 공유)
 static TOPMOST_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+// TUI 종료 방식 (Restart = 최신 exe 재실행)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiExit {
+    Quit,
+    Restart,
+}
+
 // 1. 터미널 복원 가드 ---------------------------------------------------------
 // 정상 종료·오류·panic 어느 경로든 Drop 으로 원래 화면 복구, 이어서 상태 저장 스레드의 남은 요청을 제한 시간 안에 쓰고 합류 (마지막 확정 저장이 사라지지 않음)
 struct TerminalGuard {
@@ -92,7 +99,7 @@ fn restore_terminal() {
 }
 
 // 3. TUI 실행 -----------------------------------------------------------------
-pub fn run_tui(engine: MonitorEngine) -> anyhow::Result<()> {
+pub fn run_tui(engine: MonitorEngine) -> anyhow::Result<TuiExit> {
     // 1. 창 핸들 보관과 콘솔 글꼴 (클래식 콘솔만 적용, 가드가 종료 때 원래 글꼴로 복원)
     capture_initial_terminal_window();
     let console_font = engine.config.console_font.clone();
@@ -147,7 +154,12 @@ pub fn run_tui(engine: MonitorEngine) -> anyhow::Result<()> {
     terminal.clear()?;
 
     // 6. 이벤트 루프
-    run_event_loop(&mut terminal, &mut app, &ui_rx, &poll_tx, &guard.writer)
+    run_event_loop(&mut terminal, &mut app, &ui_rx, &poll_tx, &guard.writer)?;
+    Ok(if app.restart_requested {
+        TuiExit::Restart
+    } else {
+        TuiExit::Quit
+    })
 }
 
 // 4. 이벤트 루프 --------------------------------------------------------------

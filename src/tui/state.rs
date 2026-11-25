@@ -137,6 +137,8 @@ pub enum UiMessage {
     StateSaveFailed {
         detail: String,
     },
+    // 디스크 exe 새 빌드 교체 (한 번만)
+    ExeReplaced,
 }
 
 // 종료 확인 대상: 선택 프로세스 하나, 긴급 중단 대상(위험 등급 프로세스) 목록
@@ -213,6 +215,9 @@ pub struct AppState {
     pub show_help: bool,
     pub toast: Option<Toast>,
     pub should_quit: bool,
+    // 디스크 exe 새 빌드 교체 (강제 재시작 칩 표시), 강제 재시작으로 종료
+    pub exe_replaced: bool,
+    pub restart_requested: bool,
 }
 
 impl AppState {
@@ -257,6 +262,8 @@ impl AppState {
             show_help: false,
             toast: None,
             should_quit: false,
+            exe_replaced: false,
+            restart_requested: false,
         }
     }
 
@@ -387,6 +394,7 @@ impl AppState {
         match key.code {
             KeyCode::Char('q' | 'Q') | KeyCode::Esc => self.perform_action(UiAction::Quit),
             KeyCode::Char('?') => self.perform_action(UiAction::ShowHelp),
+            KeyCode::Char('!') => self.perform_action(UiAction::ForceRestart),
             KeyCode::BackTab => self.switch_tab(self.tab_order[(slot + TAB_COUNT - 1) % TAB_COUNT]),
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.switch_tab(self.tab_order[(slot + TAB_COUNT - 1) % TAB_COUNT])
@@ -518,6 +526,13 @@ impl AppState {
                 self.show_toast(i18n::text(self.lang, Msg::ToastLanguage), ToastLevel::Info);
                 UiCommand::SaveState
             }
+            // 새 빌드가 없으면 칩이 없으므로 키도 무시
+            UiAction::ForceRestart if self.exe_replaced => {
+                self.restart_requested = true;
+                self.should_quit = true;
+                UiCommand::None
+            }
+            UiAction::ForceRestart => UiCommand::None,
             // 긴급 중단도 즉시 실행하지 않고 위험 등급 대상을 보여 주는 확인 창을 연다 (최소 크기 미달에서는 무시)
             UiAction::EmergencyStop => {
                 if self.too_small {
@@ -710,6 +725,11 @@ impl AppState {
                 self.show_toast(&i18n::state_save_failed(self.lang, &detail), ToastLevel::Error);
                 UiCommand::None
             }
+            UiMessage::ExeReplaced => {
+                self.exe_replaced = true;
+                self.show_toast(i18n::text(self.lang, Msg::ToastExeReplaced), ToastLevel::Info);
+                UiCommand::None
+            }
         }
     }
 
@@ -869,5 +889,26 @@ mod tests {
         assert_eq!(state.stale_age_secs(), Some(3));
         state.paused = true;
         assert_eq!(state.stale_age_secs(), None);
+    }
+
+    // 6. 강제 재시작
+    #[test]
+    fn bang_restarts_only_after_the_exe_was_replaced_and_plain_quit_never_requests_a_restart() {
+        let mut state = AppState::new(1000);
+        assert!(matches!(state.handle_key_event(key(KeyCode::Char('!'))), UiCommand::None));
+        assert!(!state.should_quit && !state.restart_requested);
+
+        // 교체 감지 뒤에는 재시작 표시와 함께 종료
+        state.apply_ui_message(UiMessage::ExeReplaced, state.now);
+        assert!(state.exe_replaced);
+        assert_eq!(state.toast.as_ref().unwrap().level, ToastLevel::Info);
+        state.handle_key_event(key(KeyCode::Char('!')));
+        assert!(state.should_quit && state.restart_requested);
+
+        // 일반 종료는 재시작 표시 없음
+        let mut quitting = AppState::new(1000);
+        quitting.apply_ui_message(UiMessage::ExeReplaced, quitting.now);
+        quitting.handle_key_event(key(KeyCode::Char('q')));
+        assert!(quitting.should_quit && !quitting.restart_requested);
     }
 }

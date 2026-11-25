@@ -134,6 +134,8 @@ pub enum UiAction {
     ToggleBlink,
     ResetLayout,
     ToggleLanguage,
+    // 새 빌드 감지 때만 동작
+    ForceRestart,
     EmergencyStop,
     KillSelected,
     ConfirmKill,

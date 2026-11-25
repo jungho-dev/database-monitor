@@ -385,7 +385,7 @@ fn render_footer_chips(frame: &mut Frame, row: Rect, state: &mut AppState) {
     } else {
         tonal(" [b]", chip_name(Msg::ChipBlinkOff))
     };
-    let left_chips: Vec<(UiAction, Line<'static>)> = vec![
+    let mut left_chips: Vec<(UiAction, Line<'static>)> = vec![
         (UiAction::EmergencyStop, stop_chip),
         (UiAction::TogglePause, pause_chip),
         (UiAction::Refresh, tonal(" [r]", chip_name(Msg::ChipRefresh))),
@@ -396,6 +396,20 @@ fn render_footer_chips(frame: &mut Frame, row: Rect, state: &mut AppState) {
             tonal(" [l]", chip_name(Msg::ChipResetLayout)),
         ),
     ];
+    // 새 빌드 감지 시 경고색 강제 재시작 칩 맨 앞
+    if state.exe_replaced {
+        let warn = Style::default().fg(theme::COLOR_WARN).bg(theme::BG_TONAL);
+        left_chips.insert(
+            0,
+            (
+                UiAction::ForceRestart,
+                Line::from(vec![
+                    Span::styled(" [!]", warn.add_modifier(Modifier::BOLD)),
+                    Span::styled(chip_name(Msg::ChipForceRestart), warn),
+                ]),
+            ),
+        );
+    }
     let language_chip = (
         UiAction::ToggleLanguage,
         tonal(" [L]", chip_name(Msg::ChipLanguage)),

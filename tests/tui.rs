@@ -25,6 +25,7 @@ use database_monitor::tui::layout::SplitGroup;
 use database_monitor::tui::sort::{self, SortKey, SortTable};
 use database_monitor::tui::state::{ActiveTab, AppState, KillConfirm, ToastLevel, UiCommand, UiMessage};
 use database_monitor::tui::state_writer::{STATE_SAVE_JOIN_LIMIT, SaveFinish, spawn_state_writer};
+use database_monitor::tui::theme;
 use database_monitor::tui::views::{render_frame, risk_cell_text};
 use common::{bloat_snapshot, build_fixture_snapshot};
 
@@ -1436,9 +1437,10 @@ fn help_overlay_uses_a_double_border_dims_the_backdrop_and_truncates_when_short(
             );
             assert!(screen.contains(keyboard), "{label}");
             assert!(screen.contains(close), "{label}");
-            // 3. 높이가 모자라면 마지막 줄이 잘림 표시 (키보드·마우스 두 구역은 큰 화면에서 모두)
+            // 3. 높이가 모자라면 마지막 줄이 잘림 표시 (도움말 줄 + 테두리·여백 4줄이 화면 높이 - 2 안에 들면 두 구역 모두)
             let truncated = screen.contains(text(lang, Msg::HelpTruncated));
-            if height <= 16 {
+            let fits = i18n::help_rows(lang).len() as u16 + 4 <= height.saturating_sub(2);
+            if !fits {
                 assert!(truncated, "{label} 잘림 줄");
             } else {
                 assert!(screen.contains(mouse_title), "{label} 마우스 구역");
@@ -2409,6 +2411,35 @@ fn no_tab_draws_markdown_pipe_table_rows_at_the_size_matrix_in_both_languages() 
                     assert!(!row.contains("|---") && !pipe_row, "{lang:?} {tab:?} {width}x{height}: {row}");
                 }
             }
+        }
+    }
+}
+
+// 36. 강제 재시작 칩 ----------------------------------------------------------
+#[test]
+fn force_restart_chip_leads_the_footer_in_the_warning_color_only_after_the_exe_was_replaced() {
+    for lang in [Lang::En, Lang::Ko] {
+        for (width, height) in [(130u16, 40u16), (60, 16)] {
+            let label = format!("{lang:?} {width}x{height}");
+
+            // 1. 교체 전: 칩 없음
+            let mut state = state_with(calm_snapshot(3), ActiveTab::Overview, lang);
+            draw(&mut state, width, height);
+            assert!(
+                state.hit_areas.button_rects.iter().all(|(action, _)| *action != UiAction::ForceRestart),
+                "{label}"
+            );
+
+            // 2. 교체 뒤: 첫 칩, 경고색 키 글자
+            state.exe_replaced = true;
+            let buffer = draw(&mut state, width, height);
+            let (action, rect) = state.hit_areas.button_rects[0];
+            assert_eq!(action, UiAction::ForceRestart, "{label}");
+            let expected = format!("[!] {}", text(lang, Msg::ChipForceRestart));
+            assert_eq!(cells_text(&buffer, rect), expected, "{label}");
+            let key_cell = &buffer[(rect.x + 1, rect.y)];
+            assert_eq!(key_cell.symbol(), "[", "{label}");
+            assert_eq!(key_cell.fg, theme::COLOR_WARN, "{label}");
         }
     }
 }

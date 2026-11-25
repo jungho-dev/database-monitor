@@ -9,11 +9,13 @@ use crate::app::applog;
 use crate::collector::MonitorEngine;
 use crate::collector::process::terminate_local_process;
 use crate::app::model::ProcessSummary;
+use crate::app::relaunch::{BUILD_ID, EXE_PATH, ExeWatch, read_build_id};
 use crate::tui::state::UiMessage;
 
 // 일시정지 중 명령 대기 상한
 const PAUSED_WAIT: Duration = Duration::from_millis(500);
 const SLOW_COLLECT: Duration = Duration::from_secs(1);
+const EXE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 // 1. UI → 수집 스레드 명령 ----------------------------------------------------
 #[derive(Debug, Clone)]
@@ -50,6 +52,12 @@ fn run_poller(
         return;
     }
     let mut next_tick = Instant::now() + interval;
+    // exe 교체 감시 (경로·기동 식별자 없으면 생략)
+    let mut exe_watch = match EXE_PATH.as_deref() {
+        Some(path) if !BUILD_ID.is_empty() => Some((path, ExeWatch::new(BUILD_ID.clone()))),
+        _ => None,
+    };
+    let mut last_exe_check = Instant::now();
 
     loop {
         // 1. 다음 수집 시각까지 명령 대기 (일시정지 중에는 짧게 끊어 반복)
@@ -102,6 +110,22 @@ fn run_poller(
                 }
             }
             Err(RecvTimeoutError::Disconnected) => return,
+        }
+
+        // 2. exe 교체 확인 (2초 간격, 첫 판정에 한 번 알림)
+        let due = last_exe_check.elapsed() >= EXE_CHECK_INTERVAL;
+        let replaced = match exe_watch.as_mut() {
+            Some((path, watch)) if due => {
+                last_exe_check = Instant::now();
+                watch.observe(&read_build_id(path))
+            }
+            _ => false,
+        };
+        if replaced {
+            exe_watch = None;
+            if ui_tx.send(UiMessage::ExeReplaced).is_err() {
+                return;
+            }
         }
     }
 }

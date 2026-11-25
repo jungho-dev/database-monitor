@@ -5,13 +5,15 @@ use std::thread;
 use std::time::Duration;
 use clap::Parser;
 use database_monitor::app::applog;
+use database_monitor::app::relaunch;
 use database_monitor::app::cli::{CliArgs, print_text_snapshot};
 use database_monitor::collector::MonitorEngine;
 use database_monitor::app::config::{home_dir, resolve_log_dir};
-use database_monitor::tui::run_tui;
+use database_monitor::tui::{TuiExit, run_tui};
 
 // 1. 엔트리포인트 -------------------------------------------------------------
 fn main() {
+    relaunch::init_build_identity();
     let args = CliArgs::parse();
     let cfg = match args.into_config() {
         Ok(cfg) => cfg,
@@ -55,11 +57,26 @@ fn main() {
         return;
     }
 
-    match run_tui(engine) {
-        Ok(()) => applog::info("Monitor stopped (user quit)"),
+    let exit = match run_tui(engine) {
+        Ok(exit) => exit,
         Err(err) => {
             applog::error(&format!("Monitor exited abnormally: {err:#}"));
             eprintln!("database-monitor runtime error: {err}");
+            std::process::exit(1);
+        }
+    };
+    if exit == TuiExit::Quit {
+        applog::info("Monitor stopped (user quit)");
+        return;
+    }
+
+    // 강제 재시작 (터미널 복원 뒤 최신 exe)
+    applog::info("Monitor restarting on the latest build (force restart)");
+    match relaunch::rerun_latest_exe() {
+        Ok(code) => std::process::exit(code),
+        Err(err) => {
+            applog::error(&format!("Force restart failed: {err:#}"));
+            eprintln!("database-monitor force restart failed: {err:#}");
             std::process::exit(1);
         }
     }

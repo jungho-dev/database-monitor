@@ -245,6 +245,7 @@ database-monitor --host 192.0.2.10=DEV-DB --ports 3307
     - `l`: reset card order, card sizes, and column widths of the current tab; the language stays.
     - `L`: switch the display language between English and Korean.
     - `?`: help overlay; any key or a click closes it.
+    - `!`: force restart, only after a new build replaced the running exe on disk: restores the terminal and reruns the TUI from the latest exe with the same arguments.
     - `q` / `Esc` / `Ctrl+C`: quit.
 2. **Mouse**
     - Click a tab, a footer chip, a card (focus, thick border), or a row (select).
@@ -267,6 +268,7 @@ database-monitor --host 192.0.2.10=DEV-DB --ports 3307
     - A scrollable card shows ` a-b / total ` on its bottom border.
 5. **Footer**
     - Every chip is clickable and mirrors its key; when the width runs out the left chips drop from the right, the `[L]` language chip drops last, and the help and quit chips stay pinned right.
+    - When a new build replaces the running exe on disk (checked every 2 seconds), a warn-colored `[!] Force restart` chip leads the footer and stays visible at the minimum size; clicking it does what `!` does.
     - The hint row shows a toast first (4 seconds; only an error toast is a red fill), then the keys that apply to the pointer, the focused card, and the tab.
 6. **Minimum size**
     - The minimum is 60x16; below it, one line reads `Terminal too small (min 60x16, now WxH)` and nothing else is drawn.
