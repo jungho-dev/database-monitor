@@ -8,7 +8,7 @@ use crate::tui::cards::{
     CardPress, ColumnDrag, MAX_TABLE_COLUMNS, ScrollDrag, UiAction, scroll_for_thumb, scroll_thumb,
 };
 use crate::tui::i18n::{self, Msg};
-use crate::tui::layout::{SplitAxis, SplitDrag};
+use crate::tui::layout::{SplitAxis, SplitDrag, SplitGroup};
 use crate::tui::sort::SortChange;
 use crate::tui::state::{AppState, ToastLevel, UiCommand};
 use crate::tui::tab_move::TabDrag;
@@ -66,8 +66,8 @@ impl AppState {
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.tab_drag.is_some() {
                     self.preview_tab_move(position);
-                } else if self.card_move.is_some() {
-                    self.preview_card_move(position);
+                } else if self.grid_move.is_some() {
+                    self.preview_grid_move(position);
                 } else if let Some(press) = self.card_press {
                     // 누른 칸을 벗어나 시간이 차기 전에 끌면 취소 (같은 칸의 흔들림은 유지)
                     if position != press.cell {
@@ -309,27 +309,31 @@ impl AppState {
         }
 
         // 3. 카드 제목 글자 누름: 카드 포커스 후 길게 누름 대기 (카드 경계 잡기보다 우선, 이동 모드는 tick 이 진입)
-        // 순서를 바꿀 수 있는 그룹이 이번 프레임에 그려진 카드만, 나머지 테두리는 계속 크기 조절
+        // 이번 프레임 격자 줄에 그려진 카드만, 나머지 테두리는 계속 크기 조절
         let title_card = self
             .hit_areas
             .title_hits
             .iter()
             .find(|hit| hit.rect.contains(position))
             .map(|hit| hit.card);
-        let title_slot = title_card
-            .and_then(|card| card.reorder_slot(self.tab).map(|slot| (card, slot)))
-            .filter(|(_, (group, _))| {
-                self.hit_areas
-                    .slot_groups
-                    .iter()
-                    .any(|slots| slots.group == *group)
-            });
-        if let Some((card, (group, index))) = title_slot {
+        let grid_title = title_card.and_then(|card| {
+            self.hit_areas
+                .grid_lines
+                .iter()
+                .filter(|line| line.tab == self.tab)
+                .find_map(|line| {
+                    line.cards
+                        .iter()
+                        .position(|(placed, _)| *placed == card)
+                        .map(|column| (card, line.row, column))
+                })
+        });
+        if let Some((card, row, column)) = grid_title {
             self.focused_card = Some((self.tab, card));
             self.card_press = Some(CardPress {
                 card,
-                group,
-                index,
+                group: SplitGroup::GridCols(self.tab, row as u8),
+                index: column,
                 started: now,
                 cell: position,
             });

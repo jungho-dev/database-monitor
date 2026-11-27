@@ -10,35 +10,79 @@ use crate::app::model::MonitorSnapshot;
 use crate::analysis::risk::format_bytes;
 use crate::tui::cards::CardId;
 use crate::tui::i18n::{self, Msg};
-use crate::tui::layout::{SplitAxis, SplitGroup};
+use crate::tui::layout::grid::{CardSlot, SlotHeight};
 use crate::tui::sort;
-use crate::tui::state::AppState;
+use crate::tui::state::{ActiveTab, AppState};
 use crate::tui::theme;
 use crate::tui::views::common::{
     ColumnFit, CardTable, TableRow, render_card_table, render_text_card,
 };
+use crate::tui::views::overview::{metric_slots, render_metric_card};
 
 // 1. 과조회SQL 탭 -------------------------------------------------------------
+// 탭 격자: 0행 지표, 핑거프린트 랭킹 표, 선택 SQL 상세
 pub fn render_top_sql_tab(
     frame: &mut Frame,
     area: Rect,
     state: &mut AppState,
     snap: &Arc<MonitorSnapshot>,
 ) {
-    let lang = state.lang;
-    let detail_h = (area.height / 2)
-        .clamp(7, 14)
-        .min(area.height.saturating_sub(5));
-    let cards = state.card_layout.split_cards(
-        &mut state.hit_areas,
-        SplitGroup::TopSqlRows,
-        SplitAxis::Rows,
-        area,
-        &[area.height.saturating_sub(detail_h)],
-        &[5, 3],
-    );
+    // 1. 카드 조건 (지표 줄을 뺼 높이 기준 상세 높이)
+    let rest_h = area.height.saturating_sub(4);
+    let detail_h = (rest_h / 2).clamp(7, 14).min(rest_h.saturating_sub(5));
+    let mut slots = metric_slots().to_vec();
+    slots.extend([
+        CardSlot {
+            card: CardId::TopSqlRanking,
+            min_w: 24,
+            min_h: 4,
+            height: SlotHeight::Fill,
+            weight: 1,
+            rank: 0,
+            reserve: 0,
+        },
+        CardSlot {
+            card: CardId::SqlDetail,
+            min_w: 20,
+            min_h: 3,
+            height: SlotHeight::Fixed(detail_h),
+            weight: 1,
+            rank: 0,
+            reserve: 0,
+        },
+    ]);
 
-    // 1. 핑거프린트 랭킹 표
+    // 2. 격자 배치와 카드 그리기
+    let layout = state.card_layout;
+    let placed = layout.arrange_tab(&mut state.hit_areas, ActiveTab::TopSql, area, &slots);
+    for (card, rect) in placed {
+        match card {
+            CardId::Risk | CardId::Connections | CardId::Traffic | CardId::QueryRate => {
+                render_metric_card(frame, rect, state, snap, card)
+            }
+            CardId::TopSqlRanking => render_ranking_table(frame, rect, state, snap),
+            CardId::SqlDetail => render_sql_detail(frame, rect, state, snap),
+            CardId::Processes
+            | CardId::Sockets
+            | CardId::SqlStream
+            | CardId::Inspector
+            | CardId::AlertLog
+            | CardId::AlertDetail
+            | CardId::Gate
+            | CardId::ChartSqlMix
+            | CardId::ChartTopTables => {}
+        }
+    }
+}
+
+// 2. 핑거프린트 랭킹 표 -------------------------------------------------------
+fn render_ranking_table(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut AppState,
+    snap: &Arc<MonitorSnapshot>,
+) {
+    let lang = state.lang;
     let columns = vec![
         (Msg::ColRisk, 6, ColumnFit::Pinned, Alignment::Left),
         (Msg::ColOp, 6, ColumnFit::Fixed, Alignment::Left),
@@ -76,7 +120,7 @@ pub fn render_top_sql_tab(
     render_card_table(
         frame,
         state,
-        cards[0],
+        area,
         CardTable {
             card: CardId::TopSqlRanking,
             tone: theme::BORDER_DIM,
@@ -87,8 +131,17 @@ pub fn render_top_sql_tab(
             empty: (Msg::EmptyTopSql, Msg::EmptyTopSqlHint),
         },
     );
+}
 
-    // 2. 선택 SQL 상세: 진단, 실행 지표, 행위자, 핑거프린트, 최근 실행 원문
+// 3. 선택 SQL 상세: 진단, 실행 지표, 행위자, 핑거프린트, 최근 실행 원문 -------
+fn render_sql_detail(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut AppState,
+    snap: &Arc<MonitorSnapshot>,
+) {
+    let lang = state.lang;
+    let view = sort::top_sql(snap, &state.sorts);
     let selected = state.card_views[CardId::TopSqlRanking as usize]
         .selected
         .min(view.len().saturating_sub(1));
@@ -164,7 +217,7 @@ pub fn render_top_sql_tab(
         frame,
         state,
         CardId::SqlDetail,
-        cards[1],
+        area,
         i18n::text(lang, Msg::CardSqlDetail),
         lines,
     );

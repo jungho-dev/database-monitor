@@ -2,6 +2,7 @@
 //! 화면 조립: 앱 바, 탭 바, 본문, 하단 칩·안내, 카드 경계 손잡이, 도움말·종료 확인 겹침.
 
 pub mod alerts;
+pub mod charts;
 pub mod common;
 pub mod overview;
 pub mod processes;
@@ -17,7 +18,6 @@ use crate::analysis::risk::format_bytes;
 use crate::tui::cards::{CardId, CardKind, UiAction, UiHitAreas};
 use crate::tui::format::{fit_display, text_width};
 use crate::tui::i18n::{self, Lang, Msg};
-use crate::tui::layout::{SplitAxis, SplitGroup};
 use crate::tui::state::{ActiveTab, AppState, KillConfirm, ToastLevel};
 use crate::tui::theme;
 use crate::tui::views::common::{
@@ -87,7 +87,7 @@ pub fn render_frame(frame: &mut Frame, state: &mut AppState) {
 }
 
 // 2. 본문 ---------------------------------------------------------------------
-// 지표 카드 줄, 위험 시 경보 카드, 탭 내용 (첫 집계 전에는 대기 안내 카드)
+// 위험 시 맨 위 경보 카드, 탭 격자 (0행 지표 카드, 첫 집계 전에는 대기 안내 카드)
 fn render_body(frame: &mut Frame, area: Rect, state: &mut AppState) {
     let Some(snap) = state.snapshot.clone() else {
         render_notice_card(
@@ -101,7 +101,7 @@ fn render_body(frame: &mut Frame, area: Rect, state: &mut AppState) {
         return;
     };
 
-    // 1. 지표 줄 높이 (경보 카드와 탭 내용 최소 높이 확보)
+    // 1. 경보 카드 높이 (위험일 때만, 낮은 본문은 한 줄)
     let siren_height: u16 = if !state.is_critical() {
         0
     } else if area.height >= SIREN_CARD_BODY_HEIGHT {
@@ -109,27 +109,18 @@ fn render_body(frame: &mut Frame, area: Rect, state: &mut AppState) {
     } else {
         1
     };
-    let panes = state.card_layout.split_cards(
-        &mut state.hit_areas,
-        SplitGroup::MetricRows,
-        SplitAxis::Rows,
-        area,
-        &[4],
-        &[3, siren_height + 8],
-    );
-    let below = Layout::vertical([Constraint::Length(siren_height), Constraint::Min(0)]).split(panes[1]);
+    let rows = Layout::vertical([Constraint::Length(siren_height), Constraint::Min(0)]).split(area);
 
-    // 2. 카드 그리기
-    overview::render_metric_cards(frame, panes[0], state, &snap);
+    // 2. 경보 카드와 탭 격자
     if siren_height > 0 {
         let summary = i18n::summary_text(state.lang, &snap.risk_summary);
-        render_siren(frame, below[0], state, &summary);
+        render_siren(frame, rows[0], state, &summary);
     }
     match state.tab {
-        ActiveTab::Overview => overview::render_overview_tab(frame, below[1], state, &snap),
-        ActiveTab::Processes => processes::render_processes_tab(frame, below[1], state, &snap),
-        ActiveTab::TopSql => top_sql::render_top_sql_tab(frame, below[1], state, &snap),
-        ActiveTab::Alerts => alerts::render_alerts_tab(frame, below[1], state, &snap),
+        ActiveTab::Overview => overview::render_overview_tab(frame, rows[1], state, &snap),
+        ActiveTab::Processes => processes::render_processes_tab(frame, rows[1], state, &snap),
+        ActiveTab::TopSql => top_sql::render_top_sql_tab(frame, rows[1], state, &snap),
+        ActiveTab::Alerts => alerts::render_alerts_tab(frame, rows[1], state, &snap),
     }
 }
 

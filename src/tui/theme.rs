@@ -68,7 +68,14 @@ pub const SCROLL_THUMB_DRAG: Color = Color::Indexed(231);
 pub const SPLIT_GRIP_HOT: Color = Color::Indexed(250);
 pub const SPLIT_GRIP_DRAG: Color = Color::Indexed(231);
 
-// 6. 공용 스타일 --------------------------------------------------------------
+// 6. 차트 계열 색 (계열마다 한 의미, 포커스·강조·상태 색과 겹치지 않음) -------
+pub const CHART_RX: Color = Color::Indexed(173);
+pub const CHART_QPS: Color = Color::Indexed(139);
+// SQL 작업 색 중 SELECT(81)는 강조색과 같아 계열 색으로 못 쓰므로 구성 막대는 한 색
+pub const CHART_SQL_MIX: Color = Color::Indexed(108);
+pub const CHART_TABLES: Color = Color::Indexed(180);
+
+// 7. 공용 스타일 --------------------------------------------------------------
 pub const STYLE_TEXT: Style = Style::new().fg(FG_TEXT);
 pub const STYLE_DIM: Style = Style::new().fg(FG_DIM);
 pub const STYLE_FAINT: Style = Style::new().fg(FG_FAINT);
@@ -114,7 +121,7 @@ pub const STYLE_CONFIRM_YES: Style = Style::new()
     .add_modifier(Modifier::BOLD);
 pub const STYLE_CONFIRM_NO: Style = Style::new().fg(FG_TEXT).bg(BG_TONAL);
 
-// 7. 위험도·행위자·SQL 작업 스타일 --------------------------------------------
+// 8. 위험도·행위자·SQL 작업 스타일 --------------------------------------------
 pub fn risk_color(level: RiskLevel) -> Color {
     match level {
         RiskLevel::Safe => COLOR_OK,
@@ -209,5 +216,33 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
+    }
+
+    // 3. 차트 계열 색 분리
+    #[test]
+    fn chart_series_colors_are_distinct_and_never_reuse_reserved_colors() {
+        let series = [CHART_RX, CHART_QPS, CHART_SQL_MIX, CHART_TABLES];
+        let reserved = [
+            BORDER_FOCUS,
+            BORDER_HOVER,
+            FG_ACCENT,
+            COLOR_OK,
+            COLOR_WARN,
+            COLOR_CRIT,
+            COLOR_OBSERVE,
+            COLOR_CRIT_BG,
+            COLOR_ACTOR_AGENT,
+            COLOR_ACTOR_SPRING,
+            COLOR_ACTOR_CLIENT,
+            COLOR_ACTOR_SCRIPT,
+            COLOR_SQL_SELECT,
+            COLOR_SQL_META,
+        ];
+        for (index, left) in series.iter().enumerate() {
+            for right in &series[index + 1..] {
+                assert_ne!(left, right);
+            }
+            assert!(!reserved.contains(left));
+        }
     }
 }

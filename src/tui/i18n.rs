@@ -168,6 +168,8 @@ define_messages! {
     CardInspector => ("Selected Process Inspector", "선택 프로세스 인스펙터"),
     CardTopSql => ("Over-query & Loop SQL Fingerprints", "과조회·반복 루프 SQL 핑거프린트 랭킹"),
     CardSqlDetail => ("Selected SQL Detail", "선택 SQL 상세"),
+    CardSqlMix => ("SQL Mix", "SQL 구성"),
+    CardTopTables => ("Top Tables by RX", "수신량 상위 테이블"),
     CardAlertLog => ("Over-query & Over-run Alert Log", "과조회·과작동 경보 로그"),
     CardAlertDetail => ("Selected Alert Detail", "선택 경보 상세"),
     CardGate => ("Collector", "수집기"),
@@ -288,7 +290,7 @@ define_messages! {
     // 알림
     ToastLanguage => ("Language: English", "표시 언어: 한국어"),
     ToastLayoutReset => ("Layout reset to default", "기본 배치로 복원"),
-    ToastCardMoved => ("Card order changed (l: reset)", "카드 순서 변경 (l: 기본 배치)"),
+    ToastCardMoved => ("Card moved (l resets layout)", "카드 위치 변경 (l 기본 배치)"),
     ToastTabMoved => ("Tab order changed", "탭 순서 변경"),
     ToastSplitDrag => ("Drag card edge · release to keep · l to reset", "카드 경계 드래그 · 놓으면 고정 · l 기본 배치"),
     ToastColumnDrag => ("Drag column width · double-click for auto", "열 폭 드래그 · 더블클릭 자동 폭"),

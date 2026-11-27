@@ -22,6 +22,7 @@ use database_monitor::app::model::{MonitorSnapshot, RiskLevel, RiskReason};
 use database_monitor::tui::cards::{CARD_HOLD_TIME, CardId, ColumnHit, UiAction, scroll_thumb};
 use database_monitor::tui::i18n::{self, Lang, Msg, reason_text, text};
 use database_monitor::tui::layout::SplitGroup;
+use database_monitor::tui::layout::grid::default_rows;
 use database_monitor::tui::sort::{self, SortKey, SortTable};
 use database_monitor::tui::state::{ActiveTab, AppState, KillConfirm, ToastLevel, UiCommand, UiMessage};
 use database_monitor::tui::state_writer::{STATE_SAVE_JOIN_LIMIT, SaveFinish, spawn_state_writer};
@@ -118,6 +119,30 @@ fn card_rect(state: &AppState, card: CardId) -> Rect {
         .find(|(id, _)| *id == card)
         .map(|(_, rect)| *rect)
         .unwrap_or_else(|| panic!("{card:?} 카드 영역 없음"))
+}
+
+// 탭 격자 한 줄의 카드 (빈 줄 제외한 줄 번호)
+fn grid_row(state: &AppState, tab: ActiveTab, row: usize) -> Vec<CardId> {
+    let rows: Vec<Vec<CardId>> = state
+        .card_layout
+        .grid_of(tab)
+        .rows
+        .iter()
+        .map(|cells| cells.iter().flatten().copied().collect::<Vec<CardId>>())
+        .filter(|cards| !cards.is_empty())
+        .collect();
+    rows[row].clone()
+}
+
+// 카드가 그려진 화면 줄 영역
+fn grid_line_rect(state: &AppState, card: CardId) -> Rect {
+    state
+        .hit_areas
+        .grid_lines
+        .iter()
+        .find(|line| line.cards.iter().any(|(placed, _)| *placed == card))
+        .map(|line| line.rect)
+        .unwrap_or_else(|| panic!("{card:?} 줄 영역 없음"))
 }
 
 fn button_rect(state: &AppState, action: UiAction) -> Rect {
@@ -1069,13 +1094,9 @@ fn long_press_on_a_card_title_enters_move_mode_previews_live_and_release_commits
         .find(|hit| hit.card == CardId::Processes)
         .copied()
         .unwrap();
-    let slots_before = state
-        .hit_areas
-        .slot_groups
-        .iter()
-        .find(|slots| slots.group == SplitGroup::OverviewCols)
-        .cloned()
-        .unwrap();
+    let line_before = grid_line_rect(&state, CardId::Processes);
+    let slots_before = (card_rect(&state, CardId::Processes), card_rect(&state, CardId::Sockets));
+    let target = card_rect(&state, CardId::Sockets);
     let base = Instant::now();
 
     // 1. 누른 채 가만히 있어도 400ms 에 진입 (움직임 이벤트 없음)
@@ -1086,10 +1107,9 @@ fn long_press_on_a_card_title_enters_move_mode_previews_live_and_release_commits
     assert!(state.tick(base + CARD_HOLD_TIME));
     assert!(state.card_move.is_some() && state.card_press.is_none());
 
-    // 2. 같은 칸 흔들림은 상관없음, 다른 칸 슬롯으로 끌면 미리보기 순서가 바뀜
-    let target = slots_before.slots[1];
-    drag_at(&mut state, target.x + target.width / 2, target.y + 3, after(base, 500));
-    assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [1, 0]);
+    // 2. 같은 칸 흔들림은 상관없음, 이웃 카드 오른쪽 안으로 끌면 미리보기 순서가 바뀜
+    drag_at(&mut state, target.right() - 2, target.y + 3, after(base, 500));
+    assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Sockets, CardId::Processes]);
     let buffer = draw(&mut state, 130, 40);
     let processes = card_rect(&state, CardId::Processes);
     let sockets = card_rect(&state, CardId::Sockets);
@@ -1107,23 +1127,17 @@ fn long_press_on_a_card_title_enters_move_mode_previews_live_and_release_commits
         }
     }
     assert!(dump(&buffer)[usize::from(processes.y)].contains("· moving"));
-    // 칸 크기는 칸에 남음: 칸 영역 불변
-    let slots_after = state
-        .hit_areas
-        .slot_groups
-        .iter()
-        .find(|slots| slots.group == SplitGroup::OverviewCols)
-        .cloned()
-        .unwrap();
-    assert_eq!(slots_after.slots, slots_before.slots);
-    assert_eq!(sockets, slots_before.slots[0]);
-    assert_eq!(processes, slots_before.slots[1]);
+    // 줄 영역은 그대로, 칸 크기는 칸에 남음 (카드만 칸을 맞바꿈)
+    let line_after = grid_line_rect(&state, CardId::Processes);
+    assert_eq!(line_after, line_before);
+    assert_eq!(sockets, slots_before.0, "첫 칸 크기 유지");
+    assert_eq!(processes, slots_before.1, "둘째 칸 크기 유지");
 
     // 3. 놓으면 확정과 저장 요청
-    let command = release_at(&mut state, target.x + 2, target.y + 3, after(base, 600));
+    let command = release_at(&mut state, target.right() - 2, target.y + 3, after(base, 600));
     assert!(matches!(command, UiCommand::SaveState));
     assert!(state.card_move.is_none());
-    assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [1, 0]);
+    assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Sockets, CardId::Processes]);
     draw(&mut state, 130, 40);
     assert!(card_rect(&state, CardId::Sockets).x < card_rect(&state, CardId::Processes).x);
 }
@@ -1139,18 +1153,12 @@ fn move_mode_cancel_restores_the_order_and_ignores_every_key_but_escape_and_ctrl
         .find(|hit| hit.card == CardId::Processes)
         .copied()
         .unwrap();
-    let target = state
-        .hit_areas
-        .slot_groups
-        .iter()
-        .find(|slots| slots.group == SplitGroup::OverviewCols)
-        .unwrap()
-        .slots[1];
+    let target = card_rect(&state, CardId::Sockets);
     let base = Instant::now();
     press_at(&mut state, title.rect.x + 1, title.rect.y, base);
     state.tick(after(base, 400));
-    drag_at(&mut state, target.x + 5, target.y + 3, after(base, 450));
-    assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [1, 0]);
+    drag_at(&mut state, target.right() - 2, target.y + 3, after(base, 450));
+    assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Sockets, CardId::Processes]);
 
     // 이동 중에는 다른 키가 아무 일도 하지 않음 (종료·탭 전환·언어)
     state.handle_key_event(key(KeyCode::Char('q')));
@@ -1164,7 +1172,7 @@ fn move_mode_cancel_restores_the_order_and_ignores_every_key_but_escape_and_ctrl
     // Esc: 누르기 전 순서 복원
     state.handle_key_event(key(KeyCode::Esc));
     assert!(state.card_move.is_none());
-    assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [0, 1]);
+    assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Processes, CardId::Sockets]);
     assert!(!state.should_quit);
 
     // Ctrl+C 는 이동 중에도 종료
@@ -1189,13 +1197,7 @@ fn lost_release_commits_on_the_first_buttonless_move_or_a_new_press_and_is_consu
             .find(|hit| hit.card == CardId::Processes)
             .copied()
             .unwrap();
-        let target = state
-            .hit_areas
-            .slot_groups
-            .iter()
-            .find(|slots| slots.group == SplitGroup::OverviewCols)
-            .unwrap()
-            .slots[1];
+        let target = card_rect(&state, CardId::Sockets);
         (state, title, target)
     };
     let base = Instant::now();
@@ -1204,21 +1206,21 @@ fn lost_release_commits_on_the_first_buttonless_move_or_a_new_press_and_is_consu
     let (mut state, title, target) = setup();
     press_at(&mut state, title.rect.x + 1, title.rect.y, base);
     state.tick(after(base, 400));
-    drag_at(&mut state, target.x + 5, target.y + 3, after(base, 450));
+    drag_at(&mut state, target.right() - 2, target.y + 3, after(base, 450));
     let command = state.handle_mouse_event_at(
         mouse(MouseEventKind::Moved, target.x + 6, target.y + 3),
         after(base, 500),
     );
     assert!(matches!(command, UiCommand::SaveState));
     assert!(state.card_move.is_none());
-    assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [1, 0]);
+    assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Sockets, CardId::Processes]);
 
     // 2. 새 누름: 확정만 하고 클릭으로는 실행하지 않음 (포커스·선택 그대로)
     let (mut state, title, target) = setup();
     let focus_before = state.focused_card_id();
     press_at(&mut state, title.rect.x + 1, title.rect.y, base);
     state.tick(after(base, 400));
-    drag_at(&mut state, target.x + 5, target.y + 3, after(base, 450));
+    drag_at(&mut state, target.right() - 2, target.y + 3, after(base, 450));
     let command = press_at(&mut state, target.x + 6, target.y + 4, after(base, 500));
     assert!(matches!(command, UiCommand::SaveState));
     assert_eq!(state.focused_card_id(), CardId::Processes);
@@ -1231,7 +1233,7 @@ fn lost_release_commits_on_the_first_buttonless_move_or_a_new_press_and_is_consu
     state.tick(after(base, 400));
     let command = release_at(&mut state, title.rect.x + 1, title.rect.y, after(base, 450));
     assert!(matches!(command, UiCommand::None));
-    assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [0, 1]);
+    assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Processes, CardId::Sockets]);
 
     // 4. 시간 전 움직임(버튼 없음)은 일반 클릭으로 끝, 이동 모드 진입 안 함
     let (mut state, title, _) = setup();
@@ -1272,7 +1274,7 @@ fn press_released_early_is_a_click_and_a_cell_change_cancels_while_jitter_in_the
     drag_at(&mut state, title.rect.x + 2, title.rect.y, after(base, 1_200));
     assert!(state.card_press.is_none());
     assert!(!state.tick(after(base, 1_500)));
-    assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [0, 1]);
+    assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Processes, CardId::Sockets]);
 }
 
 #[test]
@@ -1282,45 +1284,49 @@ fn shift_arrows_move_the_focused_card_on_drawn_groups_and_l_restores_the_default
     let command = state.handle_key_event(shift_key(KeyCode::Right));
     assert!(matches!(command, UiCommand::None));
 
-    // 2. 가로 그룹은 좌우, 세로 방향키는 무시
+    // 2. 줄 안 좌우 교환, 줄 앞에서는 왼쪽으로 못 감
     draw(&mut state, 130, 40);
-    let command = state.handle_key_event(shift_key(KeyCode::Down));
+    let command = state.handle_key_event(shift_key(KeyCode::Left));
     assert!(matches!(command, UiCommand::None));
     let command = state.handle_key_event(shift_key(KeyCode::Right));
     assert!(matches!(command, UiCommand::SaveState));
-    assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [1, 0]);
+    assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Sockets, CardId::Processes]);
     draw(&mut state, 130, 40);
     assert!(card_rect(&state, CardId::Sockets).x < card_rect(&state, CardId::Processes).x);
 
     // 3. 끝에서는 더 못 감, 반대로 한 칸
     assert!(matches!(state.handle_key_event(shift_key(KeyCode::Right)), UiCommand::None));
     assert!(matches!(state.handle_key_event(shift_key(KeyCode::Left)), UiCommand::SaveState));
-    assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [0, 1]);
+    assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Processes, CardId::Sockets]);
 
-    // 4. 세로 그룹(에이전트·프로세스 탭): 표와 인스펙터가 위아래로 교환
+    // 4. 줄 사이 이동(에이전트·프로세스 탭): 아래 줄 합류, 다시 아래는 그 줄 아래 새 줄 (표와 인스펙터가 위아래로 교환)
     let mut rows = state_with(calm_snapshot(5), ActiveTab::Processes, Lang::En);
+    draw(&mut rows, 130, 40);
+    assert!(matches!(rows.handle_key_event(shift_key(KeyCode::Down)), UiCommand::SaveState));
+    assert_eq!(grid_row(&rows, ActiveTab::Processes, 1), [CardId::Inspector, CardId::Processes]);
     draw(&mut rows, 130, 40);
     assert!(matches!(rows.handle_key_event(shift_key(KeyCode::Down)), UiCommand::SaveState));
     draw(&mut rows, 130, 40);
     assert!(card_rect(&rows, CardId::Inspector).y < card_rect(&rows, CardId::Processes).y);
 
-    // 5. l: 순서·크기 복원, 언어 유지
+    // 5. l: 격자·크기 복원, 언어 유지
     rows.lang = Lang::Ko;
     assert!(matches!(rows.handle_key_event(key(KeyCode::Char('l'))), UiCommand::SaveState));
-    assert_eq!(rows.card_layout.order_of(SplitGroup::ProcessesRows)[..2], [0, 1]);
+    assert_eq!(rows.card_layout.grid_of(ActiveTab::Processes), default_rows(ActiveTab::Processes));
     assert_eq!(rows.lang, Lang::Ko);
 }
 
 #[test]
 fn split_boundaries_drag_as_ratios_and_resize_or_tab_switch_during_a_move_restore_the_order() {
     // 1. 경계 드래그: 비율로 보관되어 크기가 바뀌어도 같은 비율
+    let table_cols = SplitGroup::GridCols(ActiveTab::Overview, 1);
     let mut state = state_with(calm_snapshot(5), ActiveTab::Overview, Lang::En);
     draw(&mut state, 130, 40);
     let hit = state
         .hit_areas
         .split_hits
         .iter()
-        .find(|hit| hit.group == SplitGroup::OverviewCols)
+        .find(|hit| hit.group == table_cols)
         .copied()
         .unwrap();
     let base = Instant::now();
@@ -1333,7 +1339,7 @@ fn split_boundaries_drag_as_ratios_and_resize_or_tab_switch_during_a_move_restor
         .hit_areas
         .split_hits
         .iter()
-        .find(|hit| hit.group == SplitGroup::OverviewCols)
+        .find(|hit| hit.group == table_cols)
         .copied()
         .unwrap();
     assert_eq!(moved.line.x, hit.line.x + 12);
@@ -1342,7 +1348,7 @@ fn split_boundaries_drag_as_ratios_and_resize_or_tab_switch_during_a_move_restor
         .hit_areas
         .split_hits
         .iter()
-        .find(|hit| hit.group == SplitGroup::OverviewCols)
+        .find(|hit| hit.group == table_cols)
         .copied()
         .unwrap();
     let ratio = f64::from(moved.cuts[0]) / f64::from(moved.span_len);
@@ -1360,27 +1366,21 @@ fn split_boundaries_drag_as_ratios_and_resize_or_tab_switch_during_a_move_restor
             .find(|hit| hit.card == CardId::Processes)
             .copied()
             .unwrap();
-        let target = state
-            .hit_areas
-            .slot_groups
-            .iter()
-            .find(|slots| slots.group == SplitGroup::OverviewCols)
-            .unwrap()
-            .slots[1];
+        let target = card_rect(&state, CardId::Sockets);
         press_at(&mut state, title.rect.x + 1, title.rect.y, base);
         state.tick(after(base, 400));
-        drag_at(&mut state, target.x + 5, target.y + 3, after(base, 450));
-        assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [1, 0]);
+        drag_at(&mut state, target.right() - 2, target.y + 3, after(base, 450));
+        assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Sockets, CardId::Processes]);
         if resize {
             state.handle_resize(130, 40);
         } else {
             state.switch_tab(ActiveTab::Alerts);
         }
         assert!(state.card_move.is_none());
-        assert_eq!(state.card_layout.order_of(SplitGroup::OverviewCols)[..2], [0, 1]);
+        assert_eq!(grid_row(&state, ActiveTab::Overview, 1), [CardId::Processes, CardId::Sockets]);
     }
 
-    // 3. 지표 카드도 제목 길게 누름으로 순서 변경 (모든 탭 공통 묶음)
+    // 3. 지표 카드도 제목 길게 누름으로 순서 변경 (탭마다 0행)
     let mut metric = state_with(calm_snapshot(5), ActiveTab::Alerts, Lang::En);
     draw(&mut metric, 100, 30);
     let risk_title = metric
@@ -1390,18 +1390,15 @@ fn split_boundaries_drag_as_ratios_and_resize_or_tab_switch_during_a_move_restor
         .find(|hit| hit.card == CardId::Risk)
         .copied()
         .unwrap();
-    let last_slot = metric
-        .hit_areas
-        .slot_groups
-        .iter()
-        .find(|slots| slots.group == SplitGroup::MetricCols)
-        .unwrap()
-        .slots[3];
+    let last_card = card_rect(&metric, CardId::QueryRate);
     press_at(&mut metric, risk_title.rect.x + 1, risk_title.rect.y, base);
     metric.tick(after(base, 400));
-    drag_at(&mut metric, last_slot.x + 2, last_slot.y + 1, after(base, 450));
-    release_at(&mut metric, last_slot.x + 2, last_slot.y + 1, after(base, 500));
-    assert_eq!(metric.card_layout.order_of(SplitGroup::MetricCols), [1, 2, 3, 0]);
+    drag_at(&mut metric, last_card.right() - 2, last_card.y + 1, after(base, 450));
+    release_at(&mut metric, last_card.right() - 2, last_card.y + 1, after(base, 500));
+    assert_eq!(
+        grid_row(&metric, ActiveTab::Alerts, 0),
+        [CardId::Connections, CardId::Traffic, CardId::QueryRate, CardId::Risk]
+    );
     draw(&mut metric, 100, 30);
     assert!(card_rect(&metric, CardId::Risk).x > card_rect(&metric, CardId::QueryRate).x);
 }
@@ -2086,7 +2083,7 @@ fn lost_release_ends_split_column_and_scroll_drags_on_a_buttonless_move_with_an_
         .hit_areas
         .split_hits
         .iter()
-        .find(|hit| hit.group == SplitGroup::OverviewCols)
+        .find(|hit| hit.group == SplitGroup::GridCols(ActiveTab::Overview, 1))
         .copied()
         .unwrap();
     press_at(&mut state, hit.grab.x + 1, hit.grab.y + 5, base);
@@ -2100,7 +2097,7 @@ fn lost_release_ends_split_column_and_scroll_drags_on_a_buttonless_move_with_an_
         .hit_areas
         .split_hits
         .iter()
-        .find(|hit| hit.group == SplitGroup::OverviewCols)
+        .find(|hit| hit.group == SplitGroup::GridCols(ActiveTab::Overview, 1))
         .copied()
         .unwrap();
     assert_eq!(moved.line.x, hit.line.x + 12);
@@ -2111,7 +2108,7 @@ fn lost_release_ends_split_column_and_scroll_drags_on_a_buttonless_move_with_an_
         .hit_areas
         .split_hits
         .iter()
-        .find(|hit| hit.group == SplitGroup::OverviewCols)
+        .find(|hit| hit.group == SplitGroup::GridCols(ActiveTab::Overview, 1))
         .copied()
         .unwrap();
     assert_eq!(after_drag.line.x, moved.line.x);
@@ -2173,7 +2170,7 @@ fn a_new_press_resets_every_drag_state_first_and_a_tab_switch_commits_a_moved_dr
             .hit_areas
             .split_hits
             .iter()
-            .find(|hit| hit.group == SplitGroup::OverviewCols)
+            .find(|hit| hit.group == SplitGroup::GridCols(ActiveTab::Overview, 1))
             .copied()
             .unwrap();
         (state, hit)

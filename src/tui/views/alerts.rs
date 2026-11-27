@@ -9,35 +9,79 @@ use ratatui::text::{Line, Span};
 use crate::app::model::MonitorSnapshot;
 use crate::tui::cards::CardId;
 use crate::tui::i18n::{self, Msg};
-use crate::tui::layout::{SplitAxis, SplitGroup};
+use crate::tui::layout::grid::{CardSlot, SlotHeight};
 use crate::tui::sort;
-use crate::tui::state::AppState;
+use crate::tui::state::{ActiveTab, AppState};
 use crate::tui::theme;
 use crate::tui::views::common::{
     ColumnFit, CardTable, TableRow, render_card_table, render_text_card,
 };
+use crate::tui::views::overview::{metric_slots, render_metric_card};
 
 // 1. 위험경보 탭 --------------------------------------------------------------
+// 탭 격자: 0행 지표, 경보 로그 표, 선택 경보 상세
 pub fn render_alerts_tab(
     frame: &mut Frame,
     area: Rect,
     state: &mut AppState,
     snap: &Arc<MonitorSnapshot>,
 ) {
-    let lang = state.lang;
-    let detail_h = (area.height / 2)
-        .clamp(7, 14)
-        .min(area.height.saturating_sub(5));
-    let cards = state.card_layout.split_cards(
-        &mut state.hit_areas,
-        SplitGroup::AlertsRows,
-        SplitAxis::Rows,
-        area,
-        &[area.height.saturating_sub(detail_h)],
-        &[5, 3],
-    );
+    // 1. 카드 조건 (지표 줄을 뺼 높이 기준 상세 높이)
+    let rest_h = area.height.saturating_sub(4);
+    let detail_h = (rest_h / 2).clamp(7, 14).min(rest_h.saturating_sub(5));
+    let mut slots = metric_slots().to_vec();
+    slots.extend([
+        CardSlot {
+            card: CardId::AlertLog,
+            min_w: 24,
+            min_h: 4,
+            height: SlotHeight::Fill,
+            weight: 1,
+            rank: 0,
+            reserve: 0,
+        },
+        CardSlot {
+            card: CardId::AlertDetail,
+            min_w: 20,
+            min_h: 3,
+            height: SlotHeight::Fixed(detail_h),
+            weight: 1,
+            rank: 0,
+            reserve: 0,
+        },
+    ]);
 
-    // 1. 경보 로그 표
+    // 2. 격자 배치와 카드 그리기
+    let layout = state.card_layout;
+    let placed = layout.arrange_tab(&mut state.hit_areas, ActiveTab::Alerts, area, &slots);
+    for (card, rect) in placed {
+        match card {
+            CardId::Risk | CardId::Connections | CardId::Traffic | CardId::QueryRate => {
+                render_metric_card(frame, rect, state, snap, card)
+            }
+            CardId::AlertLog => render_alert_log(frame, rect, state, snap),
+            CardId::AlertDetail => render_alert_detail(frame, rect, state, snap),
+            CardId::Processes
+            | CardId::Sockets
+            | CardId::SqlStream
+            | CardId::Inspector
+            | CardId::TopSqlRanking
+            | CardId::SqlDetail
+            | CardId::Gate
+            | CardId::ChartSqlMix
+            | CardId::ChartTopTables => {}
+        }
+    }
+}
+
+// 2. 경보 로그 표 -------------------------------------------------------------
+fn render_alert_log(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut AppState,
+    snap: &Arc<MonitorSnapshot>,
+) {
+    let lang = state.lang;
     let columns = vec![
         (Msg::ColTime, 8, ColumnFit::Fixed, Alignment::Left),
         (Msg::ColLevel, 4, ColumnFit::Pinned, Alignment::Left),
@@ -65,7 +109,7 @@ pub fn render_alerts_tab(
     render_card_table(
         frame,
         state,
-        cards[0],
+        area,
         CardTable {
             card: CardId::AlertLog,
             tone: theme::BORDER_DIM,
@@ -76,8 +120,17 @@ pub fn render_alerts_tab(
             empty: (Msg::EmptyAlerts, Msg::EmptyAlertsHint),
         },
     );
+}
 
-    // 2. 선택 경보 상세: 사유, 대상 DB, 경보 시점 최근 SQL 원문
+// 3. 선택 경보 상세: 사유, 대상 DB, 경보 시점 최근 SQL 원문 -------------------
+fn render_alert_detail(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut AppState,
+    snap: &Arc<MonitorSnapshot>,
+) {
+    let lang = state.lang;
+    let view = sort::alerts(snap, &state.sorts);
     let selected = state.card_views[CardId::AlertLog as usize]
         .selected
         .min(view.len().saturating_sub(1));
@@ -142,7 +195,7 @@ pub fn render_alerts_tab(
         frame,
         state,
         CardId::AlertDetail,
-        cards[1],
+        area,
         i18n::text(lang, Msg::CardAlertDetail),
         lines,
     );

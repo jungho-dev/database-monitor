@@ -107,7 +107,12 @@ database-monitor
 ```
 
 2. **Read the screen**
-    - From top to bottom: app bar, tab bar, four metric cards (risk, DB connections, inbound traffic, query rate with a 60-second trend), an alert card while `CRITICAL`, the content cards, and the footer (action chips and a hint row).
+    - From top to bottom: app bar, tab bar, an alert card while `CRITICAL` (the siren band, above the metric row), the card grid of the tab, and the footer (action chips and a hint row).
+    - Each tab has its own card grid; row 0 always holds the four metric cards (risk, DB connections, inbound traffic, query rate with a 60-second trend), and a row holds at most 6 cards.
+    - Overview rows by default: the metric cards; Processes and Sockets; SQL Mix and Top Tables by RX; the SQL stream; the Inspector. The other tabs hold the metric cards, their table, and their detail card.
+    - `SQL Mix` is a horizontal bar card with the share of executions per SQL kind; `Top Tables by RX` ranks tables by received bytes and ends a row with `!n` when n SQL fingerprints of that table are at `WARNING` or above.
+    - When the terminal is short, the two bar cards are the first cards to hide, then the SQL stream row, then rows from the bottom: the bar cards show at 130x40 and hide at 100x30, and the SQL stream shows from 100x30 and hides at 60x16.
+    - The Traffic and Query rate cards draw their sparkline in their own series color, with a `━` legend mark in the same color at the start of the value line; the sparkline repeats its samples to fill a wide card and is right-aligned.
     - `q`, `Esc`, or `Ctrl+C` quits; `?` opens the help overlay.
 3. **Check capture**
     - The app bar shows `Capture drops N` (`캡처 누락 N` in Korean) when frames were dropped; RX and QPS may then read lower than the real values.
@@ -241,8 +246,9 @@ database-monitor --host 192.0.2.10=DEV-DB --ports 3307
     - `x` / `F9` / `F12`: open the confirmation to stop every `CRITICAL` local process; `Y` confirms.
     - `K` (Shift+k): confirmation overlay to kill the selected process on tabs 1 and 2; `Y` confirms.
     - `t`: always-on-top toggle, enabled automatically on danger; `b`: alert blink toggle, default on.
-    - `Shift+←` / `Shift+→` / `Shift+↑` / `Shift+↓`: move the focused card one slot (`←` `→` in a row of cards, `↑` `↓` in a column).
-    - `l`: reset card order, card sizes, and column widths of the current tab; the language stays.
+    - `Shift+←` / `Shift+→`: swap the focused card with its neighbor in the same grid row.
+    - `Shift+↑` / `Shift+↓`: a card that shares its row moves into a new row above or below itself; a card alone in its row joins the end of the nearest row above or below (nothing happens when there is none), so repeated presses alternate between the two.
+    - `l`: reset the card grid, grid ratios, and column widths of the current tab; the tab order and the language stay, and other tabs are untouched.
     - `L`: switch the display language between English and Korean.
     - `?`: help overlay; any key or a click closes it.
     - `!`: force restart, only after a new build replaced the running exe on disk: restores the terminal and reruns the TUI from the latest exe with the same arguments.
@@ -253,7 +259,8 @@ database-monitor --host 192.0.2.10=DEV-DB --ports 3307
     - A column edge shows a faint `│` at rest and can be grabbed from one header cell on each side; on hover or drag a `┃` spans the full table height; double-clicking the edge cell restores the automatic width, and clicking the header cell beside it sorts.
     - Drag a tab to change the tab order; `Esc` cancels.
     - Drag a card border to resize cards; the sizes are kept as ratios.
-    - Hold a card title for 400 ms, then drag to move the card with a live preview (dashed border); release to place it, `Esc` to cancel.
+    - Hold a card title for 400 ms, then drag to move the card across grid rows with a live preview (dashed border); drop it on a row's bottom border or another row's top border to make a new row, and a row left empty disappears; release to place it and save, `Esc`, a tab switch, or a resize cancels. A move changes only the grid of the current tab.
+    - Reordering cards inside a row keeps each slot's width: the cards trade places and the widths stay with the slots.
     - A button released outside the window is noticed at the next mouse move: it ends a card move, card border drag, column width drag, or scrollbar drag like a release, and a moved drag is saved.
     - The wheel scrolls the card under the pointer; drag the scrollbar thumb, or click the track to move one page.
 3. **Sorting**
@@ -281,9 +288,10 @@ database-monitor --host 192.0.2.10=DEV-DB --ports 3307
     - `~/.config/database-monitor/tui.toml`, next to `config.toml`; `~` is `USERPROFILE`, or `HOME` when that is unset.
     - When the file is a symbolic link, the link stays and the file it points to is updated; a chain of up to 16 links is followed, and a longer chain or a loop is reported as a save error.
 2. **Content**
-    - `version`, `language`, card orders, split ratios, column widths, and the tab order; only values that differ from the defaults are written.
+    - `version` (stays `1`), `language`, card grids (`[grids]`), grid ratios (`[grid_ratios]`), column widths, and the tab order; only values that differ from the defaults are written.
     - A hand-edited invalid entry is skipped and the rest still apply; column widths are capped at 512 cells.
     - The tab order is written only when it differs from the default, as `tab_order = ["processes", "overview", "top_sql", "alerts"]`; a value that is not a permutation of the four tabs is skipped, and the `l` reset keeps the tab order.
+    - A file from an earlier version with `[orders]` or `[ratios]` is read once and migrated into `[grids]` and `[grid_ratios]` (a grid already stored for a tab wins over that tab's `[orders]`); those tables are never written again, the file is copied to `tui.toml.bak` when it is loaded, before the first save, and the row-height ratios of the earlier layout are dropped.
     - Sort order and the selected row are not saved.
 3. **When it is written**
     - Only on a committed change: a finished card move, card border drag, column width drag, or tab move (drag or `<` / `>`), the language switch, and the `l` reset.
@@ -298,19 +306,19 @@ database-monitor --host 192.0.2.10=DEV-DB --ports 3307
 version = 1
 language = "ko"
 
-[orders]
-metric_cols = [3, 0, 1, 2]
+[grids]
+overview = [["risk", "connections", "traffic", "query_rate"], ["sockets", "processes"], ["chart_sql_mix", "chart_top_tables"], ["sql_stream"], ["inspector"]]
 
-[ratios]
-top_sql_rows = [6000]
+[grid_ratios]
+overview_cols_0 = [2500, 5000, 7500]
 
 [column_widths]
 processes = [0, 14, 0, 9, 0, 0, 0, 0, 0]
 ```
 
 ```markdown
-orders: card order of a group, listed slot by slot (the card index placed in each slot)
-ratios: border positions in ten-thousandths of the group length
+grids: per tab, the card keys of each grid row in order, top row first; only a tab whose grid differs from its default is listed
+grid_ratios: card width cuts of grid row N as <tab>_cols_N, line height cuts for N visible lines as <tab>_rows_N, in ten-thousandths
 column_widths: width of each column in cells, 0 means automatic width
 ```
 

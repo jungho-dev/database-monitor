@@ -3,11 +3,11 @@
 
 use std::time::{Duration, Instant};
 use ratatui::layout::{Position, Rect};
-use crate::tui::layout::{MAX_SLOTS, SplitAxis, SplitGroup, SplitHit};
+use crate::tui::layout::{SplitGroup, SplitHit};
 use crate::tui::sort::SortTable;
 use crate::tui::state::ActiveTab;
 
-pub const CARD_COUNT: usize = CardId::Gate as usize + 1;
+pub const CARD_COUNT: usize = CardId::ChartTopTables as usize + 1;
 // 카드 제목을 누른 채 이 시간이 지나면 이동 모드
 pub const CARD_HOLD_TIME: Duration = Duration::from_millis(400);
 
@@ -29,6 +29,9 @@ pub enum CardId {
     AlertDetail,
     // 첫 집계 대기 안내
     Gate,
+    // 막대 차트: SQL 작업 구성, 수신량 상위 테이블
+    ChartSqlMix,
+    ChartTopTables,
 }
 
 // 휠·키 동작 구분: 고정, 화면 위치만 이동, 선택 행과 화면 위치 함께 이동
@@ -54,6 +57,8 @@ impl CardId {
         Self::AlertLog,
         Self::AlertDetail,
         Self::Gate,
+        Self::ChartSqlMix,
+        Self::ChartTopTables,
     ];
 
     pub fn kind(self) -> CardKind {
@@ -64,9 +69,13 @@ impl CardId {
             | Self::Inspector
             | Self::SqlDetail
             | Self::AlertDetail => CardKind::Scrollable,
-            Self::Risk | Self::Connections | Self::Traffic | Self::QueryRate | Self::Gate => {
-                CardKind::Static
-            }
+            Self::Risk
+            | Self::Connections
+            | Self::Traffic
+            | Self::QueryRate
+            | Self::Gate
+            | Self::ChartSqlMix
+            | Self::ChartTopTables => CardKind::Static,
         }
     }
 
@@ -78,26 +87,6 @@ impl CardId {
             Self::SqlStream => Some(SortTable::Events),
             Self::TopSqlRanking => Some(SortTable::TopSql),
             Self::AlertLog => Some(SortTable::Alerts),
-            _ => None,
-        }
-    }
-
-    // 순서를 바꿀 수 있는 카드의 (그룹, 카드 번호), 번호 = 뷰가 분할 결과에서 쓰는 위치
-    // 같은 카드도 탭에 따라 묶음이 다름 (지표 카드는 모든 탭 공통)
-    pub fn reorder_slot(self, tab: ActiveTab) -> Option<(SplitGroup, usize)> {
-        match (self, tab) {
-            (Self::Risk, _) => Some((SplitGroup::MetricCols, 0)),
-            (Self::Connections, _) => Some((SplitGroup::MetricCols, 1)),
-            (Self::Traffic, _) => Some((SplitGroup::MetricCols, 2)),
-            (Self::QueryRate, _) => Some((SplitGroup::MetricCols, 3)),
-            (Self::Processes, ActiveTab::Overview) => Some((SplitGroup::OverviewCols, 0)),
-            (Self::Sockets, ActiveTab::Overview) => Some((SplitGroup::OverviewCols, 1)),
-            (Self::Processes, ActiveTab::Processes) => Some((SplitGroup::ProcessesRows, 0)),
-            (Self::Inspector, ActiveTab::Processes) => Some((SplitGroup::ProcessesRows, 1)),
-            (Self::TopSqlRanking, ActiveTab::TopSql) => Some((SplitGroup::TopSqlRows, 0)),
-            (Self::SqlDetail, ActiveTab::TopSql) => Some((SplitGroup::TopSqlRows, 1)),
-            (Self::AlertLog, ActiveTab::Alerts) => Some((SplitGroup::AlertsRows, 0)),
-            (Self::AlertDetail, ActiveTab::Alerts) => Some((SplitGroup::AlertsRows, 1)),
             _ => None,
         }
     }
@@ -216,13 +205,13 @@ pub struct TitleHit {
     pub rect: Rect,
 }
 
-// 순서를 바꿀 수 있는 그룹의 이번 프레임 칸 배치 (slots = 칸 영역, cards[칸] = 그 칸에 놓인 카드 번호)
+// 격자로 그린 탭의 이번 프레임 화면 줄 (row = 격자 줄 번호, cards = 줄 안 카드 영역)
 #[derive(Debug, Clone)]
-pub struct SlotGroupHit {
-    pub group: SplitGroup,
-    pub axis: SplitAxis,
-    pub slots: Vec<Rect>,
-    pub cards: Vec<usize>,
+pub struct GridLineHit {
+    pub tab: ActiveTab,
+    pub row: usize,
+    pub rect: Rect,
+    pub cards: Vec<(CardId, Rect)>,
 }
 
 // 카드 제목을 누른 채 대기 중 (started = 누른 시각, cell = 누른 칸, 시간이 차기 전 다른 칸으로 끌면 취소)
@@ -235,14 +224,10 @@ pub struct CardPress {
     pub cell: Position,
 }
 
-// 진행 중 카드 이동 (baseline = 누르기 전 칸별 카드 번호, target = 지금 미리보기 중인 칸)
+// 진행 중 카드 이동 (격자와 놓을 자리는 GridMove)
 #[derive(Debug, Clone, Copy)]
 pub struct CardMove {
     pub card: CardId,
-    pub group: SplitGroup,
-    pub index: usize,
-    pub baseline: [u8; MAX_SLOTS],
-    pub target: usize,
 }
 
 // 매 프레임 그리기에서 다시 채우는 클릭 영역
@@ -257,7 +242,7 @@ pub struct UiHitAreas {
     pub scroll_hits: Vec<ScrollHit>,
     pub card_rects: Vec<(CardId, Rect)>,
     pub title_hits: Vec<TitleHit>,
-    pub slot_groups: Vec<SlotGroupHit>,
+    pub grid_lines: Vec<GridLineHit>,
 }
 
 // 5. 스크롤바 썸 --------------------------------------------------------------
@@ -301,31 +286,6 @@ pub fn scroll_for_thumb(total: usize, visible: usize, track: u16, thumb_start: u
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // 1. 카드 묶음 완결성
-    #[test]
-    fn reorder_slots_cover_every_reorderable_group_exactly_once_per_tab() {
-        for tab in ActiveTab::ALL {
-            for group in SplitGroup::ALL {
-                let mut indices: Vec<usize> = CardId::ALL
-                    .iter()
-                    .filter_map(|card| card.reorder_slot(tab))
-                    .filter(|(owner, _)| *owner == group)
-                    .map(|(_, index)| index)
-                    .collect();
-                indices.sort_unstable();
-                let shown = tab.split_groups().contains(&group);
-                if group.is_reorderable() && shown {
-                    let expected: Vec<usize> = (0..group.card_count()).collect();
-                    assert_eq!(indices, expected, "{tab:?} {group:?}");
-                } else {
-                    assert!(indices.is_empty(), "{tab:?} {group:?}");
-                }
-            }
-        }
-        assert_eq!(CardId::Gate.reorder_slot(ActiveTab::Overview), None);
-        assert_eq!(CardId::ALL.len(), CARD_COUNT);
-    }
 
     // 2. 썸 비율
     #[test]

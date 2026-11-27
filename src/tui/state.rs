@@ -11,6 +11,7 @@ use crate::tui::cards::{
     MAX_TABLE_COLUMNS, ScrollDrag, UiAction, UiHitAreas,
 };
 use crate::tui::i18n::{self, Lang, Msg};
+use crate::tui::layout::grid::GridMove;
 use crate::tui::layout::{CardLayout, SplitDrag, SplitGroup};
 use crate::tui::sort::{self, SortChange, TableSorts};
 use crate::tui::tab_move::TabDrag;
@@ -75,34 +76,6 @@ impl ActiveTab {
             Self::Processes => &[CardId::Processes],
             Self::TopSql => &[CardId::TopSqlRanking],
             Self::Alerts => &[CardId::AlertLog],
-        }
-    }
-
-    // 탭 안 카드 경계 그룹 (배치 초기화 대상, 지표 카드 묶음은 모든 탭이 공유)
-    pub fn split_groups(self) -> &'static [SplitGroup] {
-        match self {
-            Self::Overview => &[
-                SplitGroup::MetricRows,
-                SplitGroup::MetricCols,
-                SplitGroup::OverviewRows,
-                SplitGroup::OverviewCompactRows,
-                SplitGroup::OverviewCols,
-            ],
-            Self::Processes => &[
-                SplitGroup::MetricRows,
-                SplitGroup::MetricCols,
-                SplitGroup::ProcessesRows,
-            ],
-            Self::TopSql => &[
-                SplitGroup::MetricRows,
-                SplitGroup::MetricCols,
-                SplitGroup::TopSqlRows,
-            ],
-            Self::Alerts => &[
-                SplitGroup::MetricRows,
-                SplitGroup::MetricCols,
-                SplitGroup::AlertsRows,
-            ],
         }
     }
 }
@@ -195,9 +168,10 @@ pub struct AppState {
     // 카드 경계 비율·순서 (tui.toml 로 저장·복원), 드래그 중·마우스 아래 경계
     pub card_layout: CardLayout,
     pub split_drag: Option<SplitDrag>,
-    // 카드 제목을 누른 채 대기 중, 길게 눌러 진입한 카드 이동 중
+    // 카드 제목을 누른 채 대기 중, 길게 눌러 진입한 카드 이동 중, 이동 중인 격자 카드 (누르기 전 격자·누른 순간 줄)
     pub card_press: Option<CardPress>,
     pub card_move: Option<CardMove>,
+    pub grid_move: Option<GridMove>,
     pub split_hover: Option<(SplitGroup, usize)>,
     // 카드별 끌어 정한 열 폭 (None 이면 자동 폭, tui.toml 로 저장·복원), 열 경계 드래그 중·마우스 아래 경계
     // last_column_click = 끌지 않고 뗀 직전 경계 클릭 (더블클릭 판정용)
@@ -249,6 +223,7 @@ impl AppState {
             split_drag: None,
             card_press: None,
             card_move: None,
+            grid_move: None,
             split_hover: None,
             column_widths: [[None; MAX_TABLE_COLUMNS]; CARD_COUNT],
             column_drag: None,
@@ -510,7 +485,7 @@ impl AppState {
                 UiCommand::None
             }
             UiAction::ResetLayout => {
-                self.card_layout.reset_groups(self.tab.split_groups());
+                self.card_layout.reset_tab(self.tab);
                 for card in self.tab.table_cards() {
                     self.column_widths[*card as usize] = [None; MAX_TABLE_COLUMNS];
                 }
@@ -817,9 +792,11 @@ mod tests {
         assert_eq!(state.lang, Lang::Ko);
 
         // 배치 초기화는 언어를 건드리지 않음
-        state
-            .card_layout
-            .restore_ratios(SplitGroup::MetricRows, &[5_000]);
+        assert!(
+            state
+                .card_layout
+                .restore_grid_ratios("overview_cols_0", &[2_500, 5_000, 7_500])
+        );
         let command = state.handle_key_event(key(KeyCode::Char('l')));
         assert!(matches!(command, UiCommand::SaveState));
         assert_eq!(state.lang, Lang::Ko);

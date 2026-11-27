@@ -1,86 +1,46 @@
 //! layout.rs
-//! 카드 배치: 그룹별 경계 비율·카드 순서 보관, 카드 영역 분할, 경계 드래그 영역 계산.
+//! 카드 배치: 탭 격자·경계 비율 보관, 카드 영역 분할, 경계 드래그 영역 계산.
+
+pub mod grid;
 
 use ratatui::layout::Rect;
-use crate::tui::cards::{SlotGroupHit, UiHitAreas};
+use crate::tui::cards::{CardId, GridLineHit, UiHitAreas};
+use crate::tui::layout::grid::{CardSlot, GRID_SLOTS, TabGrid, default_rows, plan_lines};
+use crate::tui::state::{ActiveTab, TAB_COUNT};
 
-// 그룹당 최대 경계 수와 칸 수, 경계 비율 단위(만분율)
-pub const MAX_CUTS: usize = 3;
-pub const MAX_SLOTS: usize = MAX_CUTS + 1;
+// 그룹당 최대 칸 수(격자 줄·카드 수 상한)와 경계 수, 경계 비율 단위(만분율), 탭당 격자 비율 칸 수
+pub const MAX_SLOTS: usize = GRID_SLOTS;
+pub const MAX_CUTS: usize = MAX_SLOTS - 1;
 const RATIO_SCALE: u32 = 10_000;
-pub const GROUP_COUNT: usize = SplitGroup::AlertsRows as usize + 1;
-// 순서를 바꾸지 않은 칸 배치 (칸 번호 = 카드 번호)
-pub const IDENTITY_ORDER: [u8; MAX_SLOTS] = [0, 1, 2, 3];
+const GRID_GROUPS_PER_TAB: usize = MAX_SLOTS * 2;
 
 // 1. 분할 그룹과 드래그 영역 --------------------------------------------------
 // 한 축으로 나란한 카드 묶음
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitGroup {
-    // 지표 줄과 나머지 본문
-    MetricRows,
-    MetricCols,
-    OverviewRows,
-    // SQL 스트림이 들어갈 수 없는 낮은 화면
-    OverviewCompactRows,
-    OverviewCols,
-    ProcessesRows,
-    TopSqlRows,
-    AlertsRows,
+    // 탭 격자: 화면 줄 높이 (보이는 줄 수), 격자 줄 안 카드 폭 (격자 줄 번호)
+    GridRows(ActiveTab, u8),
+    GridCols(ActiveTab, u8),
 }
 
 impl SplitGroup {
-    pub const ALL: [Self; GROUP_COUNT] = [
-        Self::MetricRows,
-        Self::MetricCols,
-        Self::OverviewRows,
-        Self::OverviewCompactRows,
-        Self::OverviewCols,
-        Self::ProcessesRows,
-        Self::TopSqlRows,
-        Self::AlertsRows,
-    ];
-
-    // 상태 파일에서 그룹을 가리키는 고정 이름 (열거형 번호는 쓰지 않음)
-    pub fn group_key(self) -> &'static str {
+    // 탭·줄별 고유 번호 (탭 격자 비율 표 위치)
+    pub fn index(self) -> usize {
         match self {
-            Self::MetricRows => "metric_rows",
-            Self::MetricCols => "metric_cols",
-            Self::OverviewRows => "overview_rows",
-            Self::OverviewCompactRows => "overview_compact_rows",
-            Self::OverviewCols => "overview_cols",
-            Self::ProcessesRows => "processes_rows",
-            Self::TopSqlRows => "top_sql_rows",
-            Self::AlertsRows => "alerts_rows",
-        }
-    }
-
-    // 그룹을 이루는 칸(카드) 수: 뷰의 기본 경계 수 + 1 과 같아야 함
-    pub fn card_count(self) -> usize {
-        match self {
-            Self::MetricCols => 4,
-            Self::OverviewRows => 3,
-            Self::MetricRows
-            | Self::OverviewCompactRows
-            | Self::OverviewCols
-            | Self::ProcessesRows
-            | Self::TopSqlRows
-            | Self::AlertsRows => 2,
+            Self::GridRows(tab, lines) => {
+                tab as usize * GRID_GROUPS_PER_TAB + usize::from(lines).clamp(1, MAX_SLOTS) - 1
+            }
+            Self::GridCols(tab, row) => {
+                tab as usize * GRID_GROUPS_PER_TAB + MAX_SLOTS + usize::from(row).min(MAX_SLOTS - 1)
+            }
         }
     }
 
     pub fn axis(self) -> SplitAxis {
         match self {
-            Self::MetricCols | Self::OverviewCols => SplitAxis::Columns,
-            _ => SplitAxis::Rows,
+            Self::GridCols(..) => SplitAxis::Columns,
+            Self::GridRows(..) => SplitAxis::Rows,
         }
-    }
-
-    // 칸 하나가 카드 한 장인 그룹만 순서를 바꿈 (줄 그룹의 칸은 카드 묶음)
-    pub fn is_reorderable(self) -> bool {
-        !matches!(
-            self,
-            Self::MetricRows | Self::OverviewRows | Self::OverviewCompactRows
-        )
     }
 }
 
@@ -121,40 +81,27 @@ pub struct SplitDrag {
     pub moved: bool,
 }
 
-// 2. 카드 순서 계산 -----------------------------------------------------------
-// 삽입 이동: baseline 에서 card 를 빼 target 칸에 끼워 넣음 (사이 카드는 한 칸씩 밀림, count 밖 칸은 그대로)
-pub fn insert_card_order(
-    baseline: &[u8; MAX_SLOTS],
-    count: usize,
-    card: u8,
-    target: usize,
-) -> [u8; MAX_SLOTS] {
-    let mut order = *baseline;
-    let count = count.min(MAX_SLOTS);
-    let Some(from) = baseline[..count].iter().position(|placed| *placed == card) else {
-        return order;
-    };
-    let target = target.min(count.saturating_sub(1));
-    if from < target {
-        order.copy_within(from + 1..=target, from);
-    } else if from > target {
-        order.copy_within(target..from, target + 1);
-    }
-    order[target] = card;
-    order
+// 2. 카드 배치 상태 -----------------------------------------------------------
+// 격자 카드 이동 시작 때 탭의 격자 경계 비율 (취소 때 복원)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GridMoveSnapshot {
+    tab: ActiveTab,
+    ratios: [Option<[u16; MAX_CUTS]>; GRID_GROUPS_PER_TAB],
 }
 
-// 3. 카드 배치 상태 -----------------------------------------------------------
-// 그룹별 경계 비율과 칸별 카드 번호 (orders[칸] = 그 칸에 놓인 카드), None 이면 기본 배치
+// 탭별 격자와 격자 경계 비율, None 이면 기본 배치
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CardLayout {
-    ratios: [Option<[u16; MAX_CUTS]>; GROUP_COUNT],
-    orders: [Option<[u8; MAX_SLOTS]>; GROUP_COUNT],
+    // 탭별 격자 (None 이면 기본 격자)
+    grids: [Option<TabGrid>; TAB_COUNT],
+    // 탭별 격자 비율 (앞 MAX_SLOTS = 보이는 줄 수별 높이, 뒤 = 격자 줄별 폭)
+    grid_ratios: [[Option<[u16; MAX_CUTS]>; GRID_GROUPS_PER_TAB]; TAB_COUNT],
+    grid_move: Option<GridMoveSnapshot>,
 }
 
 impl CardLayout {
-    // 카드 그룹 분할: 경계 위치 결정, 드래그 영역·칸 배치 등록, 카드 영역 반환
-    // 반환 = 카드 번호 순서의 영역 (카드 k 는 지금 놓인 칸의 영역, 칸 크기·경계 비율·칸 최소 크기는 칸에 남음)
+    // 카드 그룹 분할: 경계 위치 결정, 드래그 영역 등록, 칸 영역 반환
+    // 반환 = 칸 순서의 영역 (칸 크기·경계 비율·칸 최소 크기는 칸에 남음)
     // defaults = 기본 경계 위치(셀), mins = 칸별 최소 크기 (defaults 보다 1개 많음)
     pub fn split_cards(
         &self,
@@ -173,7 +120,7 @@ impl CardLayout {
         let count = defaults.len().min(MAX_CUTS);
 
         // 1. 경계 위치 (조절한 그룹만 비율·최소 크기 적용)
-        let ratios = self.ratios[group as usize];
+        let ratios = self.ratio_cell(group);
         let mut cuts = [0u16; MAX_CUTS];
         let mut pane_start = 0u16;
         for (idx, default_cut) in defaults.iter().take(count).enumerate() {
@@ -205,26 +152,7 @@ impl CardLayout {
             pane_start = pane_end.saturating_add(gap).min(span_len);
         }
 
-        // 3. 카드 순서 적용: 카드 k 가 놓인 칸의 영역을 카드 번호 자리에 담음
-        let order = self.order_of(group);
-        let mut by_card = slots.clone();
-        let mut cards = Vec::with_capacity(slots.len());
-        for (slot, rect) in slots.iter().enumerate() {
-            let placed = usize::from(order[slot]);
-            let card = if placed < slots.len() { placed } else { slot };
-            by_card[card] = *rect;
-            cards.push(card);
-        }
-        if group.is_reorderable() {
-            hit_areas.slot_groups.push(SlotGroupHit {
-                group,
-                axis,
-                slots,
-                cards,
-            });
-        }
-
-        // 4. 경계 드래그 영역 (이웃 칸 최소 크기 사이)
+        // 3. 경계 드래그 영역 (이웃 칸 최소 크기 사이)
         for (index, cut) in cuts[..count].iter().copied().enumerate() {
             let prev_end = if index == 0 { 0 } else { cuts[index - 1] + gap };
             let next_cut = if index + 1 < count {
@@ -245,14 +173,11 @@ impl CardLayout {
                     Rect::new(origin + cut - 1, area.y, 3, area.height),
                     Rect::new(origin + cut, area.y, 1, area.height),
                 ),
-                // 위 카드 아래 테두리, 아래 카드 위 테두리 (지표 줄은 1행)
-                SplitAxis::Rows => {
-                    let grab_rows = if group == SplitGroup::MetricRows { 1 } else { 2 };
-                    (
-                        Rect::new(area.x, origin + cut - 1, area.width, grab_rows),
-                        Rect::new(area.x, origin + cut - 1, area.width, 1),
-                    )
-                }
+                // 위 카드 아래 테두리, 아래 카드 위 테두리
+                SplitAxis::Rows => (
+                    Rect::new(area.x, origin + cut - 1, area.width, 2),
+                    Rect::new(area.x, origin + cut - 1, area.width, 1),
+                ),
             };
             hit_areas.split_hits.push(SplitHit {
                 group,
@@ -270,7 +195,7 @@ impl CardLayout {
             });
         }
 
-        by_card
+        slots
     }
 
     // 경계 이동: pointer = 경계가 놓일 화면 좌표, 그룹 전체를 비율로 보관
@@ -284,7 +209,7 @@ impl CardLayout {
         let mut cuts = hit.cuts;
         cuts[hit.index] = cut;
         let span_len = u32::from(hit.span_len);
-        self.ratios[hit.group as usize] =
+        *self.ratio_cell_mut(hit.group) =
             Some(cuts.map(|cut| ((u32::from(cut) * RATIO_SCALE + span_len / 2) / span_len) as u16));
 
         let gap = match hit.axis {
@@ -294,111 +219,288 @@ impl CardLayout {
         Some((cut - hit.prev_end, hit.next_cut.saturating_sub(cut + gap)))
     }
 
-    // 칸별 카드 번호 (기본 배치는 칸 번호 = 카드 번호)
-    pub fn order_of(&self, group: SplitGroup) -> [u8; MAX_SLOTS] {
-        self.orders[group as usize].unwrap_or(IDENTITY_ORDER)
-    }
-
-    // 카드가 놓인 칸 번호
-    pub fn slot_of(&self, group: SplitGroup, card: usize) -> Option<usize> {
-        let order = self.order_of(group);
-        order[..group.card_count()]
-            .iter()
-            .position(|placed| usize::from(*placed) == card)
-    }
-
-    // 칸별 카드 번호 지정 (기본 배치와 같으면 보관하지 않음)
-    pub fn set_order(&mut self, group: SplitGroup, order: [u8; MAX_SLOTS]) {
-        self.orders[group as usize] = (order != IDENTITY_ORDER).then_some(order);
-    }
-
-    // 미리보기·확정용 삽입 이동: baseline 순서에서 card 를 target 칸으로
-    pub fn move_card_to_slot(
-        &mut self,
-        group: SplitGroup,
-        baseline: &[u8; MAX_SLOTS],
-        card: usize,
-        target: usize,
-    ) {
-        let moved = insert_card_order(baseline, group.card_count(), card as u8, target);
-        self.set_order(group, moved);
-    }
-
-    // 상태 파일 저장용: 바꾼 순서, 바꾼 경계 비율 (그룹의 카드 수 길이)
-    pub fn custom_order(&self, group: SplitGroup) -> Option<Vec<u8>> {
-        self.orders[group as usize].map(|order| order[..group.card_count()].to_vec())
-    }
-
-    pub fn custom_ratios(&self, group: SplitGroup) -> Option<Vec<u16>> {
-        self.ratios[group as usize].map(|ratio| ratio[..group.card_count() - 1].to_vec())
-    }
-
-    // 상태 파일 복원용: 길이·범위·중복이 맞을 때만 반영, 반환 = 반영 여부
-    pub fn restore_order(&mut self, group: SplitGroup, values: &[i64]) -> bool {
-        let count = group.card_count();
-        if !group.is_reorderable() || values.len() != count {
-            return false;
+    // 탭 격자 배치: 화면 줄 계획, 줄 높이·카드 폭 분할 (경계 드래그 영역 등록), 보이는 카드 영역 반환
+    pub fn arrange_tab(
+        &self,
+        hit_areas: &mut UiHitAreas,
+        tab: ActiveTab,
+        area: Rect,
+        slots: &[CardSlot],
+    ) -> Vec<(CardId, Rect)> {
+        // 1. 화면 줄 계획
+        let plan = plan_lines(&self.grid_of(tab), slots, area.width, area.height);
+        let line_count = plan.lines.len();
+        if line_count == 0 {
+            return Vec::new();
         }
-        let mut order = IDENTITY_ORDER;
-        let mut seen = [false; MAX_SLOTS];
-        for (slot, value) in values.iter().enumerate() {
-            let Ok(card) = usize::try_from(*value) else {
-                return false;
-            };
-            if card >= count || seen[card] {
-                return false;
+
+        // 2. 줄 높이 분할 (줄 최소 높이 = 카드 최소 높이 중 최대)
+        let mut row_cuts = Vec::with_capacity(line_count);
+        let mut line_mins = Vec::with_capacity(line_count);
+        let mut line_end = 0u16;
+        for line in &plan.lines {
+            line_end = line_end.saturating_add(line.height);
+            row_cuts.push(line_end);
+            let min_h = slots
+                .iter()
+                .filter(|slot| line.cards.contains(&slot.card))
+                .map(|slot| slot.min_h)
+                .max()
+                .unwrap_or(0);
+            line_mins.push(min_h);
+        }
+        row_cuts.pop();
+        let line_rects = self.split_cards(
+            hit_areas,
+            SplitGroup::GridRows(tab, line_count as u8),
+            SplitAxis::Rows,
+            area,
+            &row_cuts,
+            &line_mins,
+        );
+
+        // 3. 줄마다 카드 폭 분할 (기본 폭 = weight 비례, 넘긴 격자 줄은 비율 미적용)
+        // 넘김 판정은 격자 줄 카드 수 기준 (숨긴 화면 줄 포함)
+        // 칸 크기는 칸에 남김: 줄 카드들의 weight 를 기본 격자 위치 순으로 정렬해 칸 순서대로 배정
+        let grid = self.grid_of(tab);
+        let default_cells: Vec<Option<CardId>> =
+            default_rows(tab).rows.iter().flatten().copied().collect();
+        let plain = CardLayout::default();
+        let mut placed = Vec::with_capacity(slots.len());
+        for (line, line_rect) in plan.lines.iter().zip(&line_rects) {
+            let row_members = grid.rows[line.row]
+                .iter()
+                .flatten()
+                .filter(|card| slots.iter().any(|slot| slot.card == **card))
+                .count();
+            let wrapped = line.cards.len() < row_members;
+            let source = if wrapped { &plain } else { self };
+            let line_slots: Vec<&CardSlot> = line
+                .cards
+                .iter()
+                .filter_map(|card| slots.iter().find(|slot| slot.card == *card))
+                .collect();
+            let mut ranked_weights: Vec<(usize, u32)> = line_slots
+                .iter()
+                .map(|slot| {
+                    let rank = default_cells
+                        .iter()
+                        .position(|cell| *cell == Some(slot.card))
+                        .unwrap_or(usize::MAX);
+                    (rank, u32::from(slot.weight.max(1)))
+                })
+                .collect();
+            ranked_weights.sort_by_key(|(rank, _)| *rank);
+            let total_weight: u32 = ranked_weights.iter().map(|(_, weight)| weight).sum();
+            let gaps = line_slots.len().saturating_sub(1) as u16;
+            let usable = u32::from(line_rect.width.saturating_sub(gaps));
+            let mut col_cuts = Vec::with_capacity(line_slots.len());
+            let mut weight_sum = 0u32;
+            for (index, (_, weight)) in ranked_weights.iter().enumerate() {
+                weight_sum += weight;
+                col_cuts.push((usable * weight_sum / total_weight) as u16 + index as u16);
             }
-            seen[card] = true;
-            order[slot] = card as u8;
+            col_cuts.pop();
+            let col_mins: Vec<u16> = line_slots.iter().map(|slot| slot.min_w).collect();
+            let hits_before = hit_areas.split_hits.len();
+            let card_rects = source.split_cards(
+                hit_areas,
+                SplitGroup::GridCols(tab, line.row as u8),
+                SplitAxis::Columns,
+                *line_rect,
+                &col_cuts,
+                &col_mins,
+            );
+            // 넘긴 격자 줄은 폭 경계 잡기 없음 (비율 미적용)
+            if wrapped {
+                hit_areas.split_hits.truncate(hits_before);
+            }
+            let line_cards: Vec<(CardId, Rect)> =
+                line.cards.iter().copied().zip(card_rects).collect();
+            placed.extend_from_slice(&line_cards);
+            hit_areas.grid_lines.push(GridLineHit {
+                tab,
+                row: line.row,
+                rect: *line_rect,
+                cards: line_cards,
+            });
         }
-        self.set_order(group, order);
-        true
+        placed
     }
 
-    pub fn restore_ratios(&mut self, group: SplitGroup, values: &[i64]) -> bool {
-        if values.len() != group.card_count() - 1 {
+    // 탭의 지금 격자 (바꾸지 않았으면 기본 격자)
+    pub fn grid_of(&self, tab: ActiveTab) -> TabGrid {
+        self.grids[tab as usize].unwrap_or_else(|| default_rows(tab))
+    }
+
+    // 격자 지정: 줄 수가 바뀌면 탭 격자 비율 전체, 아니면 구성이 바뀐 줄의 폭 비율만 초기화
+    pub fn set_grid(&mut self, tab: ActiveTab, grid: TabGrid) {
+        // 1. 줄 수 비교
+        let previous = self.grid_of(tab);
+        let old_rows = previous
+            .rows
+            .iter()
+            .filter(|cells| cells.iter().any(Option::is_some))
+            .count();
+        let new_rows = grid
+            .rows
+            .iter()
+            .filter(|cells| cells.iter().any(Option::is_some))
+            .count();
+
+        // 2. 비율 초기화
+        let tab_ratios = &mut self.grid_ratios[tab as usize];
+        for (row, (before, after)) in previous.rows.iter().zip(&grid.rows).enumerate() {
+            let kept = old_rows == new_rows
+                && before.iter().flatten().count() == after.iter().flatten().count()
+                && before
+                    .iter()
+                    .flatten()
+                    .all(|card| after.contains(&Some(*card)));
+            if !kept {
+                tab_ratios[MAX_SLOTS + row] = None;
+            }
+        }
+        if old_rows != new_rows {
+            tab_ratios[..MAX_SLOTS].fill(None);
+        }
+
+        // 3. 기본 격자와 같으면 보관하지 않음
+        self.grids[tab as usize] = (grid != default_rows(tab)).then_some(grid);
+    }
+
+    // 이동 중 미리보기 격자 (비율 유지)
+    pub fn preview_grid(&mut self, tab: ActiveTab, grid: TabGrid) {
+        self.grids[tab as usize] = (grid != default_rows(tab)).then_some(grid);
+    }
+
+    // 탭을 기본 격자로 (격자 비율도 비움)
+    pub fn reset_tab(&mut self, tab: ActiveTab) {
+        self.grids[tab as usize] = None;
+        self.grid_ratios[tab as usize] = [None; GRID_GROUPS_PER_TAB];
+    }
+
+    // 격자 카드 이동 시작: 탭 격자 비율 보관, 반환 = 이동 전 격자
+    pub fn begin_grid_move(&mut self, tab: ActiveTab) -> TabGrid {
+        self.grid_move = Some(GridMoveSnapshot {
+            tab,
+            ratios: self.grid_ratios[tab as usize],
+        });
+        self.grid_of(tab)
+    }
+
+    // 격자 카드 이동 끝: restore 가 있으면 그 격자와 시작 때 비율로 되돌림
+    pub fn end_grid_move(&mut self, tab: ActiveTab, restore: Option<TabGrid>) {
+        let snapshot = self.grid_move.take();
+        let Some(baseline) = restore else {
+            return;
+        };
+        self.grids[tab as usize] = (baseline != default_rows(tab)).then_some(baseline);
+        if let Some(snapshot) = snapshot
+            && snapshot.tab == tab
+        {
+            self.grid_ratios[tab as usize] = snapshot.ratios;
+        }
+    }
+
+    // 배치 파일 저장용 격자 비율: <탭>_rows_<보이는 줄 수>, <탭>_cols_<격자 줄 번호>
+    pub fn grid_ratio_entries(&self) -> Vec<(String, Vec<u16>)> {
+        let cells = ActiveTab::ALL
+            .iter()
+            .flat_map(|tab| (0..GRID_GROUPS_PER_TAB).map(move |slot| (*tab, slot)));
+        let mut entries = Vec::new();
+        for (tab, slot) in cells {
+            let Some(ratio) = self.grid_ratios[tab as usize][slot] else {
+                continue;
+            };
+            let (kind, number, cuts) = if slot < MAX_SLOTS {
+                ("rows", slot + 1, slot)
+            } else {
+                let row = slot - MAX_SLOTS;
+                let members = self.grid_of(tab).rows[row].iter().flatten().count();
+                ("cols", row, members.saturating_sub(1))
+            };
+            if cuts == 0 {
+                continue;
+            }
+            let tab_key = tab.tab_key();
+            entries.push((
+                format!("{tab_key}_{kind}_{number}"),
+                ratio[..cuts.min(MAX_CUTS)].to_vec(),
+            ));
+        }
+        entries
+    }
+
+    // 배치 파일 복원용: 키·길이·범위가 맞을 때만 반영 (폭 비율 길이는 지금 격자 줄의 카드 수 - 1)
+    pub fn restore_grid_ratios(&mut self, key: &str, values: &[i64]) -> bool {
+        // 1. 키 해석
+        let Some((head, number)) = key.rsplit_once('_') else {
+            return false;
+        };
+        let Some((tab_key, kind)) = head.rsplit_once('_') else {
+            return false;
+        };
+        let Some(tab) = ActiveTab::ALL
+            .into_iter()
+            .find(|tab| tab.tab_key() == tab_key)
+        else {
+            return false;
+        };
+        let Ok(number) = number.parse::<usize>() else {
+            return false;
+        };
+        let (slot, cuts) = match kind {
+            "rows" if (2..=MAX_SLOTS).contains(&number) => (number - 1, number - 1),
+            "cols" if number < MAX_SLOTS => {
+                let members = self.grid_of(tab).rows[number].iter().flatten().count();
+                (MAX_SLOTS + number, members.saturating_sub(1))
+            }
+            _ => return false,
+        };
+
+        // 2. 길이·범위
+        if cuts == 0 || values.len() != cuts {
             return false;
         }
         let mut ratios = [0u16; MAX_CUTS];
-        for (slot, value) in values.iter().enumerate() {
+        for (index, value) in values.iter().enumerate() {
             let Ok(ratio) = u16::try_from(*value) else {
                 return false;
             };
             if u32::from(ratio) > RATIO_SCALE {
                 return false;
             }
-            ratios[slot] = ratio;
+            ratios[index] = ratio;
         }
-        self.ratios[group as usize] = Some(ratios);
+        self.grid_ratios[tab as usize][slot] = Some(ratios);
         true
     }
 
-    // 그룹을 기본 배치(경계 비율·카드 순서)로 복원
-    pub fn reset_groups(&mut self, groups: &[SplitGroup]) {
-        for group in groups {
-            self.ratios[*group as usize] = None;
-            self.orders[*group as usize] = None;
-        }
+    // 그룹 경계 비율 보관 칸 (탭 격자 표)
+    fn ratio_cell(&self, group: SplitGroup) -> Option<[u16; MAX_CUTS]> {
+        let index = group.index();
+        self.grid_ratios[index / GRID_GROUPS_PER_TAB][index % GRID_GROUPS_PER_TAB]
     }
 
-    // 조절하거나 순서를 바꾼 그룹이 있는지
-    pub fn has_custom_groups(&self, groups: &[SplitGroup]) -> bool {
-        groups.iter().any(|group| {
-            self.ratios[*group as usize].is_some() || self.orders[*group as usize].is_some()
-        })
+    fn ratio_cell_mut(&mut self, group: SplitGroup) -> &mut Option<[u16; MAX_CUTS]> {
+        let index = group.index();
+        &mut self.grid_ratios[index / GRID_GROUPS_PER_TAB][index % GRID_GROUPS_PER_TAB]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyCode;
+    use crate::tui::layout::grid::{DropTarget, SlotHeight, apply_drop, shift_card};
 
     fn split_rows(layout: &CardLayout, height: u16) -> (Vec<Rect>, UiHitAreas) {
         let mut hit_areas = UiHitAreas::default();
         let area = Rect::new(0, 10, 100, height);
         let panes = layout.split_cards(
             &mut hit_areas,
-            SplitGroup::OverviewRows,
+            SplitGroup::GridRows(ActiveTab::Overview, 3),
             SplitAxis::Rows,
             area,
             &[height / 2, height - 6],
@@ -407,20 +509,45 @@ mod tests {
         (panes, hit_areas)
     }
 
-    fn split_metrics(layout: &CardLayout) -> (Vec<Rect>, UiHitAreas) {
-        let mut hit_areas = UiHitAreas::default();
-        let panes = layout.split_cards(
-            &mut hit_areas,
-            SplitGroup::MetricCols,
-            SplitAxis::Columns,
-            Rect::new(0, 2, 100, 4),
-            &[25, 51, 75],
-            &[14; 4],
-        );
-        (panes, hit_areas)
+    // 개요 기본 격자 카드 조건 (차트 줄 rank 2 reserve 5, 최소 폭 합 63 이라 폭 60 에서 넘김, 스트림 줄 rank 3 reserve 9)
+    fn grid_slots() -> Vec<CardSlot> {
+        let grid = default_rows(ActiveTab::Overview);
+        let mut slots = Vec::new();
+        for (row, cells) in grid.rows.iter().enumerate() {
+            let (min_w, min_h, height, rank, reserve) = match row {
+                0 => (14, 3, SlotHeight::Fixed(3), 0, 0),
+                1 => (20, 3, SlotHeight::Fixed(3), 0, 0),
+                2 => (31, 5, SlotHeight::Fixed(5), 2, 5),
+                3 => (30, 6, SlotHeight::Fixed(10), 3, 9),
+                _ => (20, 3, SlotHeight::Fill, 0, 0),
+            };
+            for card in cells.iter().flatten() {
+                slots.push(CardSlot {
+                    card: *card,
+                    min_w,
+                    min_h,
+                    height,
+                    weight: 1,
+                    rank,
+                    reserve,
+                });
+            }
+        }
+        slots
     }
 
-    // 1. 기본 분할
+    fn assert_disjoint_inside(placed: &[(CardId, Rect)], area: Rect) {
+        for (index, (card, rect)) in placed.iter().enumerate() {
+            assert!(
+                rect.is_empty() || area.union(*rect) == area,
+                "{card:?} {rect:?}"
+            );
+            for (other, other_rect) in &placed[index + 1..] {
+                assert!(!rect.intersects(*other_rect), "{card:?} {other:?}");
+            }
+        }
+    }
+
     #[test]
     fn default_layout_keeps_given_cuts() {
         let (panes, hit_areas) = split_rows(&CardLayout::default(), 30);
@@ -431,11 +558,8 @@ mod tests {
         // 위 카드 아래 테두리 + 아래 카드 위 테두리
         assert_eq!(hit_areas.split_hits[0].grab, Rect::new(0, 24, 100, 2));
         assert_eq!(hit_areas.split_hits[0].line, Rect::new(0, 24, 100, 1));
-        // 카드 묶음 줄 그룹은 순서를 바꾸지 않으므로 칸 배치를 등록하지 않음
-        assert!(hit_areas.slot_groups.is_empty());
     }
 
-    // 2. 경계 드래그와 비율
     #[test]
     fn dragged_cut_clamps_to_neighbor_minimum_and_keeps_ratio_on_resize() {
         let mut layout = CardLayout::default();
@@ -458,14 +582,13 @@ mod tests {
         assert_eq!(heights, [30, 6, 24]);
     }
 
-    // 3. 열 분할
     #[test]
     fn column_split_leaves_one_cell_gap_and_grabs_both_borders() {
         let mut hit_areas = UiHitAreas::default();
         let area = Rect::new(2, 5, 81, 8);
         let panes = CardLayout::default().split_cards(
             &mut hit_areas,
-            SplitGroup::OverviewCols,
+            SplitGroup::GridCols(ActiveTab::Overview, 2),
             SplitAxis::Columns,
             area,
             &[44],
@@ -479,7 +602,6 @@ mod tests {
         assert_eq!((hits[0].low, hits[0].high), (20, 60));
     }
 
-    // 4. 줄어든 터미널
     #[test]
     fn shrunk_terminal_keeps_leading_cards_at_minimum() {
         let mut layout = CardLayout::default();
@@ -492,101 +614,310 @@ mod tests {
         assert_eq!(heights, [5, 3, 1]);
     }
 
-    // 5. 그룹 복원
     #[test]
-    fn reset_restores_default_cuts_and_orders_for_listed_groups_only() {
+    fn reset_tab_restores_default_cuts_for_that_tab_only() {
         let mut layout = CardLayout::default();
         let (_, hit_areas) = split_rows(&layout, 30);
         layout.drag_cut(&hit_areas.split_hits[0], 10 + 20);
-        layout.move_card_to_slot(SplitGroup::MetricCols, &IDENTITY_ORDER, 0, 2);
-        assert!(layout.has_custom_groups(&[SplitGroup::OverviewRows]));
-        assert!(!layout.has_custom_groups(&[SplitGroup::TopSqlRows]));
+        assert_ne!(layout, CardLayout::default());
 
-        layout.reset_groups(&[SplitGroup::TopSqlRows]);
-        assert!(layout.has_custom_groups(&[SplitGroup::OverviewRows]));
+        layout.reset_tab(ActiveTab::Alerts);
+        assert_ne!(layout, CardLayout::default());
 
-        layout.reset_groups(&[SplitGroup::OverviewRows, SplitGroup::MetricCols]);
+        layout.reset_tab(ActiveTab::Overview);
         assert_eq!(layout, CardLayout::default());
     }
 
-    // 6. 삽입 이동
     #[test]
-    fn insertion_move_shifts_the_cards_between_source_and_target() {
-        let base = IDENTITY_ORDER;
-        // 앞 카드를 뒤로: 사이 카드는 한 칸씩 앞으로
-        assert_eq!(insert_card_order(&base, 4, 0, 2), [1, 2, 0, 3]);
-        // 뒤 카드를 앞으로: 사이 카드는 한 칸씩 뒤로
-        assert_eq!(insert_card_order(&base, 4, 3, 1), [0, 3, 1, 2]);
-        // 제자리, 인접 교환, 칸 수 밖 목표는 마지막 칸으로 제한
-        assert_eq!(insert_card_order(&base, 4, 2, 2), base);
-        assert_eq!(insert_card_order(&base, 2, 0, 1), [1, 0, 2, 3]);
-        assert_eq!(insert_card_order(&base, 3, 0, 9), [1, 2, 0, 3]);
-        // 범위 밖 카드는 그대로
-        assert_eq!(insert_card_order(&base, 2, 3, 0), base);
+    fn six_card_row_supports_five_cuts() {
+        let mut hit_areas = UiHitAreas::default();
+        let area = Rect::new(0, 0, 100, 4);
+        let layout = CardLayout::default();
+        let panes = layout.split_cards(
+            &mut hit_areas,
+            SplitGroup::GridCols(ActiveTab::Overview, 1),
+            SplitAxis::Columns,
+            area,
+            &[15, 31, 47, 63, 79],
+            &[8; 6],
+        );
+        assert_eq!(panes.len(), 6);
+        assert_eq!(hit_areas.split_hits.len(), 5);
+        assert_eq!(panes[5].right(), 100);
     }
 
-    // 7. 칸 크기 유지
     #[test]
-    fn slot_sizes_and_cuts_stay_unchanged_after_a_reorder_and_a_resize() {
-        let mut layout = CardLayout::default();
-        let (_, hit_areas) = split_metrics(&layout);
-        layout.drag_cut(&hit_areas.split_hits[1], 40);
-        let (_, before) = split_metrics(&layout);
-        let slot_rects = before.slot_groups[0].slots.clone();
-        let hit_cuts: Vec<[u16; MAX_CUTS]> = before.split_hits.iter().map(|hit| hit.cuts).collect();
-
-        layout.move_card_to_slot(SplitGroup::MetricCols, &IDENTITY_ORDER, 3, 0);
-        assert_eq!(layout.order_of(SplitGroup::MetricCols), [3, 0, 1, 2]);
-        let (panes, after) = split_metrics(&layout);
-        assert_eq!(after.slot_groups[0].slots, slot_rects);
-        assert_eq!(after.slot_groups[0].cards, [3, 0, 1, 2]);
-        let after_cuts: Vec<[u16; MAX_CUTS]> = after.split_hits.iter().map(|hit| hit.cuts).collect();
-        assert_eq!(after_cuts, hit_cuts);
-        // 카드 3 은 첫 칸, 카드 0 은 둘째 칸 영역
-        assert_eq!(panes[3], slot_rects[0]);
-        assert_eq!(panes[0], slot_rects[1]);
-        assert_eq!(panes[1], slot_rects[2]);
-        assert_eq!(panes[2], slot_rects[3]);
-    }
-
-    // 8. 그룹 메타데이터
-    #[test]
-    fn group_metadata_is_unique_and_matches_axis_and_reorder_scope() {
-        let mut keys: Vec<&str> = SplitGroup::ALL.iter().map(|group| group.group_key()).collect();
-        keys.sort_unstable();
-        keys.dedup();
-        assert_eq!(keys.len(), GROUP_COUNT);
-        for (position, group) in SplitGroup::ALL.iter().enumerate() {
-            assert_eq!(*group as usize, position);
-            assert!((2..=MAX_SLOTS).contains(&group.card_count()));
+    fn grid_group_indices_are_unique_per_tab_line_count_and_row() {
+        let mut grid_indices = Vec::new();
+        for tab in ActiveTab::ALL {
+            for lines in 1..=MAX_SLOTS as u8 {
+                grid_indices.push(SplitGroup::GridRows(tab, lines).index());
+            }
+            for row in 0..MAX_SLOTS as u8 {
+                grid_indices.push(SplitGroup::GridCols(tab, row).index());
+            }
         }
-        assert!(!SplitGroup::MetricRows.is_reorderable());
-        assert!(!SplitGroup::OverviewRows.is_reorderable());
-        assert!(SplitGroup::OverviewCols.is_reorderable());
-        assert_eq!(SplitGroup::MetricCols.axis(), SplitAxis::Columns);
-        assert_eq!(SplitGroup::TopSqlRows.axis(), SplitAxis::Rows);
+        grid_indices.sort_unstable();
+        grid_indices.dedup();
+        assert_eq!(grid_indices.len(), TAB_COUNT * GRID_GROUPS_PER_TAB);
+        assert!(
+            grid_indices
+                .iter()
+                .all(|index| *index < TAB_COUNT * GRID_GROUPS_PER_TAB)
+        );
+
+        let rows = SplitGroup::GridRows(ActiveTab::Overview, 3);
+        let cols = SplitGroup::GridCols(ActiveTab::Overview, 1);
+        assert_eq!(
+            (rows.axis(), cols.axis()),
+            (SplitAxis::Rows, SplitAxis::Columns)
+        );
     }
 
-    // 9. 상태 복원 검증
+    // 60x12 본문: 지표 네 장 한 줄, 표 두 장 한 줄, 인스펙터만 겹치지 않게
     #[test]
-    fn restore_rejects_wrong_length_duplicates_and_out_of_range_values() {
-        let mut layout = CardLayout::default();
-        assert!(layout.restore_order(SplitGroup::MetricCols, &[3, 2, 1, 0]));
-        assert_eq!(layout.order_of(SplitGroup::MetricCols), [3, 2, 1, 0]);
-        assert_eq!(layout.custom_order(SplitGroup::MetricCols), Some(vec![3, 2, 1, 0]));
+    fn minimum_body_shows_metrics_tables_and_inspector_without_overlap() {
+        let mut hit_areas = UiHitAreas::default();
+        let area = Rect::new(0, 3, 60, 12);
+        let placed = CardLayout::default().arrange_tab(
+            &mut hit_areas,
+            ActiveTab::Overview,
+            area,
+            &grid_slots(),
+        );
+        let cards: Vec<CardId> = placed.iter().map(|(card, _)| *card).collect();
+        assert_eq!(
+            cards,
+            [
+                CardId::Risk,
+                CardId::Connections,
+                CardId::Traffic,
+                CardId::QueryRate,
+                CardId::Processes,
+                CardId::Sockets,
+                CardId::Inspector,
+            ]
+        );
+        let rows: Vec<(u16, u16)> = placed
+            .iter()
+            .map(|(_, rect)| (rect.y, rect.height))
+            .collect();
+        assert!(rows[..4].iter().all(|row| *row == (3, 3)));
+        assert_eq!(rows[4..6], [(6, 3), (6, 3)]);
+        assert_eq!(rows[6], (9, 6));
+        assert_disjoint_inside(&placed, area);
+        assert_eq!(placed[3].1.right(), 60);
 
+        // 줄 경계 드래그 영역 둘
+        let row_hits = hit_areas
+            .split_hits
+            .iter()
+            .filter(|hit| hit.group == SplitGroup::GridRows(ActiveTab::Overview, 3))
+            .count();
+        assert_eq!(row_hits, 2);
+    }
+
+    // 모든 카드를 여섯 줄(첫 줄 여섯 장)에 채운 격자도 60x12 에서 패닉 없이 겹치지 않음
+    #[test]
+    fn a_full_grid_of_every_card_renders_disjoint_rects_at_the_minimum_body() {
+        let row_sizes = [6, 2, 2, 2, 2, 1];
+        let mut grid = TabGrid::default();
+        let mut cards = CardId::ALL.iter();
+        for (row, size) in row_sizes.iter().enumerate() {
+            for (column, card) in cards.by_ref().take(*size).enumerate() {
+                grid.rows[row][column] = Some(*card);
+            }
+        }
         let mut layout = CardLayout::default();
-        assert!(!layout.restore_order(SplitGroup::MetricCols, &[0, 1, 2]));
-        assert!(!layout.restore_order(SplitGroup::MetricCols, &[0, 1, 1, 2]));
-        assert!(!layout.restore_order(SplitGroup::MetricCols, &[0, 1, 2, 4]));
-        assert!(!layout.restore_order(SplitGroup::MetricCols, &[0, 1, 2, -1]));
-        assert!(!layout.restore_order(SplitGroup::OverviewRows, &[0, 1, 2]));
-        assert!(!layout.restore_ratios(SplitGroup::TopSqlRows, &[3_000, 5_000]));
-        assert!(!layout.restore_ratios(SplitGroup::TopSqlRows, &[10_001]));
-        assert!(!layout.restore_ratios(SplitGroup::TopSqlRows, &[-1]));
+        layout.set_grid(ActiveTab::Overview, grid);
+        let area = Rect::new(0, 3, 60, 12);
+        for (min_w, min_h, height) in [
+            (12, 3, SlotHeight::Fixed(3)),
+            (8, 1, SlotHeight::Fill),
+            (70, 20, SlotHeight::Fixed(30)),
+        ] {
+            let slots: Vec<CardSlot> = CardId::ALL
+                .iter()
+                .map(|card| CardSlot {
+                    card: *card,
+                    min_w,
+                    min_h,
+                    height,
+                    weight: 1,
+                    rank: 0,
+                    reserve: 0,
+                })
+                .collect();
+            let mut hit_areas = UiHitAreas::default();
+            let placed = layout.arrange_tab(&mut hit_areas, ActiveTab::Overview, area, &slots);
+            assert_disjoint_inside(&placed, area);
+            assert!(placed.len() <= CardId::ALL.len());
+        }
+    }
+
+    // 넘긴 격자 줄은 폭 비율을 쓰지 않고, 한 줄에 들어가면 비율 적용
+    #[test]
+    fn width_ratios_apply_only_to_rows_that_did_not_wrap() {
+        let mut layout = CardLayout::default();
+        // 차트 줄(격자 줄 2, 최소 폭 합 63)은 폭 60 에서 넘김, 130 에서는 한 줄
+        assert!(layout.restore_grid_ratios("overview_cols_2", &[3_000]));
+        let chart_rects = |layout: &CardLayout, width: u16| {
+            let mut hit_areas = UiHitAreas::default();
+            let area = Rect::new(0, 0, width, 40);
+            let placed =
+                layout.arrange_tab(&mut hit_areas, ActiveTab::Overview, area, &grid_slots());
+            placed
+                .into_iter()
+                .filter(|(card, _)| *card == CardId::ChartSqlMix || *card == CardId::ChartTopTables)
+                .collect::<Vec<(CardId, Rect)>>()
+        };
+        let default_layout = CardLayout::default();
+        assert_eq!(chart_rects(&layout, 60), chart_rects(&default_layout, 60));
+        assert_eq!(chart_rects(&layout, 60).len(), 2);
+        let wide = chart_rects(&layout, 130);
+        assert_eq!(wide[0].1.width, 39);
+        assert_ne!(wide, chart_rects(&default_layout, 130));
+    }
+
+    #[test]
+    fn set_grid_resets_ratios_by_row_count_and_row_membership() {
+        let mut layout = CardLayout::default();
+        assert!(layout.restore_grid_ratios("overview_rows_5", &[1_000, 2_000, 4_000, 6_000]));
+        assert!(layout.restore_grid_ratios("overview_cols_0", &[2_500, 5_000, 7_500]));
+        assert!(layout.restore_grid_ratios("overview_cols_1", &[5_000]));
+        let keys = |layout: &CardLayout| {
+            let mut keys: Vec<String> = layout
+                .grid_ratio_entries()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
+            keys.sort_unstable();
+            keys
+        };
+        assert_eq!(
+            keys(&layout),
+            ["overview_cols_0", "overview_cols_1", "overview_rows_5"]
+        );
+
+        // 줄 안 교환: 구성이 같아 비율 유지
+        let grid = layout.grid_of(ActiveTab::Overview);
+        let swapped = shift_card(
+            &grid,
+            CardId::Connections,
+            KeyCode::Right,
+            &[CardId::Traffic],
+        )
+        .unwrap();
+        layout.set_grid(ActiveTab::Overview, swapped);
+        assert_eq!(keys(&layout).len(), 3);
+
+        // 줄 수 그대로 합류: 구성이 바뀐 줄의 폭 비율만 초기화
+        let grid = layout.grid_of(ActiveTab::Overview);
+        let joined = apply_drop(
+            &grid,
+            CardId::Sockets,
+            DropTarget::After(CardId::ChartTopTables),
+        )
+        .unwrap();
+        layout.set_grid(ActiveTab::Overview, joined);
+        assert_eq!(keys(&layout), ["overview_cols_0", "overview_rows_5"]);
+
+        // 줄 수가 바뀜: 탭 격자 비율 전체 초기화
+        let grid = layout.grid_of(ActiveTab::Overview);
+        let fewer = apply_drop(
+            &grid,
+            CardId::Processes,
+            DropTarget::After(CardId::ChartTopTables),
+        )
+        .unwrap();
+        layout.set_grid(ActiveTab::Overview, fewer);
+        assert!(layout.grid_ratio_entries().is_empty());
+
+        // 기본 격자로 되돌리면 보관하지 않음
+        layout.set_grid(ActiveTab::Overview, default_rows(ActiveTab::Overview));
         assert_eq!(layout, CardLayout::default());
+    }
 
-        assert!(layout.restore_ratios(SplitGroup::TopSqlRows, &[6_000]));
-        assert_eq!(layout.custom_ratios(SplitGroup::TopSqlRows), Some(vec![6_000]));
+    #[test]
+    fn grid_ratio_entries_use_tab_kind_number_keys_and_restore_validates_them() {
+        // 줄 경계 드래그는 보이는 줄 수 키에 저장
+        let mut layout = CardLayout::default();
+        let mut hit_areas = UiHitAreas::default();
+        let area = Rect::new(0, 0, 130, 36);
+        layout.arrange_tab(&mut hit_areas, ActiveTab::Overview, area, &grid_slots());
+        let hit = hit_areas
+            .split_hits
+            .iter()
+            .find(|hit| hit.group == SplitGroup::GridRows(ActiveTab::Overview, 5))
+            .copied()
+            .unwrap();
+        assert!(layout.drag_cut(&hit, 2).is_some());
+        let entries = layout.grid_ratio_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "overview_rows_5");
+        assert_eq!(entries[0].1.len(), 4);
+
+        // 폭 비율 키는 격자 줄 번호, 길이 = 줄 카드 수 - 1
+        assert!(layout.restore_grid_ratios("overview_cols_1", &[5_000]));
+        let entries = layout.grid_ratio_entries();
+        assert_eq!(entries[1], ("overview_cols_1".to_string(), vec![5_000]));
+        let mut restored = CardLayout::default();
+        for (key, values) in &entries {
+            let values: Vec<i64> = values.iter().map(|value| i64::from(*value)).collect();
+            assert!(restored.restore_grid_ratios(key, &values), "{key}");
+        }
+        assert_eq!(restored, layout);
+
+        // 길이·범위·키가 맞지 않으면 거부
+        let mut layout = CardLayout::default();
+        for (key, values) in [
+            ("overview_cols_0", &[1_000, 2_000][..]),
+            ("overview_cols_0", &[1_000, 2_000, 10_001][..]),
+            ("overview_cols_1", &[-1][..]),
+            ("overview_cols_4", &[][..]),
+            ("overview_cols_6", &[5_000][..]),
+            ("overview_rows_1", &[][..]),
+            ("overview_rows_7", &[1, 2, 3, 4, 5, 6][..]),
+            ("overview_wide_2", &[5_000][..]),
+            ("nowhere_rows_2", &[5_000][..]),
+            ("alerts_cols_1", &[5_000][..]),
+            ("overview_rows_x", &[5_000][..]),
+            ("rows", &[5_000][..]),
+        ] {
+            assert!(!layout.restore_grid_ratios(key, values), "{key} {values:?}");
+        }
+        assert_eq!(layout, CardLayout::default());
+    }
+
+    // 이동 취소는 격자와 비율을 되돌리고, 확정은 새 격자 유지, reset_tab 은 기본 배치
+    #[test]
+    fn grid_move_cancel_restores_baseline_and_reset_tab_clears_the_tab() {
+        let mut layout = CardLayout::default();
+        assert!(layout.restore_grid_ratios("overview_cols_0", &[2_500, 5_000, 7_500]));
+        let before = layout;
+        let baseline = layout.begin_grid_move(ActiveTab::Overview);
+        assert_eq!(baseline, default_rows(ActiveTab::Overview));
+        let moved = apply_drop(
+            &baseline,
+            CardId::Connections,
+            DropTarget::RowAbove(CardId::Risk),
+        )
+        .unwrap();
+        layout.set_grid(ActiveTab::Overview, moved);
+        assert!(layout.grid_ratio_entries().is_empty());
+        layout.end_grid_move(ActiveTab::Overview, Some(baseline));
+        assert_eq!(layout, before);
+
+        layout.begin_grid_move(ActiveTab::Overview);
+        layout.set_grid(ActiveTab::Overview, moved);
+        layout.end_grid_move(ActiveTab::Overview, None);
+        assert_eq!(layout.grid_of(ActiveTab::Overview), moved);
+        assert_eq!(
+            layout.grid_of(ActiveTab::Alerts),
+            default_rows(ActiveTab::Alerts)
+        );
+
+        layout.reset_tab(ActiveTab::Overview);
+        assert_eq!(layout, CardLayout::default());
     }
 }

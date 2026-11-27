@@ -4,54 +4,76 @@
 use std::sync::Arc;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Sparkline};
 use crate::app::model::{MonitorSnapshot, RiskLevel};
 use crate::analysis::risk::format_bytes;
 use crate::tui::cards::CardId;
 use crate::tui::i18n::{self, Msg};
-use crate::tui::layout::{SplitAxis, SplitGroup};
+use crate::tui::layout::grid::{CardSlot, SlotHeight};
 use crate::tui::sort;
-use crate::tui::state::AppState;
+use crate::tui::state::{ActiveTab, AppState};
 use crate::tui::theme;
+use crate::tui::views::charts;
 use crate::tui::views::common::{
     ColumnFit, CardTable, TableRow, interactive_card, render_card_table, render_text_card,
 };
 use crate::tui::views::risk_cell_text;
 
-// 1. 지표 카드 줄 -------------------------------------------------------------
-// 기본 3:3:4:4 배치, 카드 사이 경계 드래그, 카드 순서 변경 가능
-pub fn render_metric_cards(
+// 1. 지표 카드 ----------------------------------------------------------------
+// 모든 탭 격자 0행의 네 카드 조건 (기본 폭 3:3:4:4, 항상 표시)
+pub fn metric_slots() -> [CardSlot; 4] {
+    [
+        CardSlot {
+            card: CardId::Risk,
+            min_w: 14,
+            min_h: 3,
+            height: SlotHeight::Fixed(4),
+            weight: 3,
+            rank: 0,
+            reserve: 0,
+        },
+        CardSlot {
+            card: CardId::Connections,
+            min_w: 14,
+            min_h: 3,
+            height: SlotHeight::Fixed(4),
+            weight: 3,
+            rank: 0,
+            reserve: 0,
+        },
+        CardSlot {
+            card: CardId::Traffic,
+            min_w: 14,
+            min_h: 3,
+            height: SlotHeight::Fixed(4),
+            weight: 4,
+            rank: 0,
+            reserve: 0,
+        },
+        CardSlot {
+            card: CardId::QueryRate,
+            min_w: 14,
+            min_h: 3,
+            height: SlotHeight::Fixed(4),
+            weight: 4,
+            rank: 0,
+            reserve: 0,
+        },
+    ]
+}
+
+// 지표 카드 한 장 (위험도·연결·트래픽·쿼리율, 다른 카드는 그리지 않음)
+pub fn render_metric_card(
     frame: &mut Frame,
     area: Rect,
     state: &mut AppState,
     snap: &Arc<MonitorSnapshot>,
+    card: CardId,
 ) {
-    // 1. 분할
+    // 1. 카드 강조 (위험 점멸 위상이면 위험도 외곽선이 위험색, 아니면 기본)
     let lang = state.lang;
-    let default_cols = Layout::horizontal([
-        Constraint::Fill(3),
-        Constraint::Fill(3),
-        Constraint::Fill(4),
-        Constraint::Fill(4),
-    ])
-    .spacing(1)
-    .split(area);
-    let default_cuts: Vec<u16> = default_cols[..3]
-        .iter()
-        .map(|col| col.right() - area.x)
-        .collect();
-    let cols = state.card_layout.split_cards(
-        &mut state.hit_areas,
-        SplitGroup::MetricCols,
-        SplitAxis::Columns,
-        area,
-        &default_cuts,
-        &[14, 14, 14, 14],
-    );
-
-    // 2. 위험도 카드 (위험 점멸 위상이면 외곽선이 위험색, 아니면 기본)
     let is_danger = snap.overall_risk >= RiskLevel::Critical;
     let alarm_border = is_danger && (state.blink_on || !state.blink_enabled);
     let badge_style = if is_danger && state.blink_on {
@@ -62,68 +84,11 @@ pub fn render_metric_cards(
     } else {
         theme::risk_badge_style(snap.overall_risk)
     };
-    let risk_lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!(
-                    " {} {} ",
-                    i18n::risk_label(lang, snap.overall_risk),
-                    snap.overall_risk_score
-                ),
-                badge_style,
-            ),
-            Span::raw(" "),
-            Span::styled(
-                i18n::risk_guidance(lang, snap.overall_risk),
-                theme::risk_text_style(snap.overall_risk),
-            ),
-        ]),
-        Line::from(Span::styled(
-            i18n::summary_text(lang, &snap.risk_summary),
-            theme::STYLE_DIM,
-        )),
-    ];
     let risk_tone = if alarm_border {
         theme::COLOR_CRIT
     } else {
         theme::BORDER_DIM
     };
-    let risk_card = interactive_card(
-        state,
-        CardId::Risk,
-        cols[0],
-        i18n::text(lang, Msg::CardRisk),
-        "",
-        risk_tone,
-    );
-    frame.render_widget(Paragraph::new(risk_lines).block(risk_card), cols[0]);
-
-    // 3. 연결 카드
-    let conn_lines = vec![
-        Line::from(vec![
-            Span::styled(format!("{} ", i18n::text(lang, Msg::MetricEstab)), theme::STYLE_DIM),
-            Span::styled(snap.active_established.to_string(), theme::STYLE_STRONG),
-            Span::styled(format!("  {} ", i18n::text(lang, Msg::MetricWait)), theme::STYLE_DIM),
-            Span::styled(snap.active_time_wait.to_string(), theme::STYLE_TEXT),
-            Span::styled(format!("  {} ", i18n::text(lang, Msg::MetricSyn)), theme::STYLE_DIM),
-            Span::styled(snap.active_syn_sent.to_string(), theme::STYLE_TEXT),
-        ]),
-        Line::from(Span::styled(
-            i18n::local_excluded(lang, snap.local_established),
-            theme::STYLE_DIM,
-        )),
-    ];
-    let conn_card = interactive_card(
-        state,
-        CardId::Connections,
-        cols[1],
-        i18n::text(lang, Msg::CardConnections),
-        "",
-        theme::BORDER_DIM,
-    );
-    frame.render_widget(Paragraph::new(conn_lines).block(conn_card), cols[1]);
-
-    // 4. 트래픽 카드: 값 1행 + 60초 스파크라인
     let rx_style = if snap.total_rx_bps >= 1024 * 1024 {
         Style::default()
             .fg(theme::COLOR_WARN)
@@ -133,78 +98,156 @@ pub fn render_metric_cards(
             .fg(theme::COLOR_OK)
             .add_modifier(Modifier::BOLD)
     };
-    let rx_line = Line::from(vec![
-        Span::styled(
-            format!(
-                "{} {}/s",
-                i18n::text(lang, Msg::MetricRx),
-                format_bytes(snap.total_rx_bps)
-            ),
-            rx_style,
-        ),
-        Span::styled(
-            format!(
-                "  {} {}/s",
-                i18n::text(lang, Msg::MetricTx),
-                format_bytes(snap.total_tx_bps)
-            ),
-            theme::STYLE_TEXT,
-        ),
-    ]);
-    let rx_card = interactive_card(
-        state,
-        CardId::Traffic,
-        cols[2],
-        i18n::text(lang, Msg::CardTraffic),
-        &i18n::total_bytes(lang, &format_bytes(snap.total_rx_bytes)),
-        theme::BORDER_DIM,
-    );
-    render_metric_with_trend(
-        frame,
-        cols[2],
-        rx_card,
-        rx_line,
-        &snap.rx_history_kb,
-        theme::risk_text_style(snap.overall_risk),
-    );
 
-    // 5. 쿼리율 카드
-    let qps_line = Line::from(vec![
-        Span::styled(
-            format!("{} {}", snap.total_qps, i18n::text(lang, Msg::MetricQps)),
-            theme::STYLE_ACCENT,
-        ),
-        Span::styled(
-            format!("  {}", i18n::alert_count(lang, snap.alerts.len())),
-            theme::STYLE_TEXT,
-        ),
-    ]);
-    let qps_card = interactive_card(
-        state,
-        CardId::QueryRate,
-        cols[3],
-        i18n::text(lang, Msg::CardQueryRate),
-        &i18n::total_queries(lang, snap.total_queries),
-        theme::BORDER_DIM,
-    );
-    render_metric_with_trend(
-        frame,
-        cols[3],
-        qps_card,
-        qps_line,
-        &snap.qps_history,
-        Style::default().fg(theme::FG_ACCENT),
-    );
+    // 2. 카드별 그리기
+    match card {
+        CardId::Risk => {
+            let risk_lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!(
+                            " {} {} ",
+                            i18n::risk_label(lang, snap.overall_risk),
+                            snap.overall_risk_score
+                        ),
+                        badge_style,
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        i18n::risk_guidance(lang, snap.overall_risk),
+                        theme::risk_text_style(snap.overall_risk),
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    i18n::summary_text(lang, &snap.risk_summary),
+                    theme::STYLE_DIM,
+                )),
+            ];
+            let risk_card = interactive_card(
+                state,
+                CardId::Risk,
+                area,
+                i18n::text(lang, Msg::CardRisk),
+                "",
+                risk_tone,
+            );
+            frame.render_widget(Paragraph::new(risk_lines).block(risk_card), area);
+        }
+        CardId::Connections => {
+            let conn_lines = vec![
+                Line::from(vec![
+                    Span::styled(format!("{} ", i18n::text(lang, Msg::MetricEstab)), theme::STYLE_DIM),
+                    Span::styled(snap.active_established.to_string(), theme::STYLE_STRONG),
+                    Span::styled(format!("  {} ", i18n::text(lang, Msg::MetricWait)), theme::STYLE_DIM),
+                    Span::styled(snap.active_time_wait.to_string(), theme::STYLE_TEXT),
+                    Span::styled(format!("  {} ", i18n::text(lang, Msg::MetricSyn)), theme::STYLE_DIM),
+                    Span::styled(snap.active_syn_sent.to_string(), theme::STYLE_TEXT),
+                ]),
+                Line::from(Span::styled(
+                    i18n::local_excluded(lang, snap.local_established),
+                    theme::STYLE_DIM,
+                )),
+            ];
+            let conn_card = interactive_card(
+                state,
+                CardId::Connections,
+                area,
+                i18n::text(lang, Msg::CardConnections),
+                "",
+                theme::BORDER_DIM,
+            );
+            frame.render_widget(Paragraph::new(conn_lines).block(conn_card), area);
+        }
+        // 트래픽 카드: 값 1행 + 60초 스파크라인
+        CardId::Traffic => {
+            let rx_line = Line::from(vec![
+                Span::styled("━ ", Style::new().fg(theme::CHART_RX)),
+                Span::styled(
+                    format!(
+                        "{} {}/s",
+                        i18n::text(lang, Msg::MetricRx),
+                        format_bytes(snap.total_rx_bps)
+                    ),
+                    rx_style,
+                ),
+                Span::styled(
+                    format!(
+                        "  {} {}/s",
+                        i18n::text(lang, Msg::MetricTx),
+                        format_bytes(snap.total_tx_bps)
+                    ),
+                    theme::STYLE_TEXT,
+                ),
+            ]);
+            let rx_card = interactive_card(
+                state,
+                CardId::Traffic,
+                area,
+                i18n::text(lang, Msg::CardTraffic),
+                &i18n::total_bytes(lang, &format_bytes(snap.total_rx_bytes)),
+                theme::BORDER_DIM,
+            );
+            render_metric_with_trend(
+                frame,
+                area,
+                rx_card,
+                rx_line,
+                &snap.rx_history_kb,
+                theme::CHART_RX,
+            );
+        }
+        CardId::QueryRate => {
+            let qps_line = Line::from(vec![
+                Span::styled("━ ", Style::new().fg(theme::CHART_QPS)),
+                Span::styled(
+                    format!("{} {}", snap.total_qps, i18n::text(lang, Msg::MetricQps)),
+                    theme::STYLE_ACCENT,
+                ),
+                Span::styled(
+                    format!("  {}", i18n::alert_count(lang, snap.alerts.len())),
+                    theme::STYLE_TEXT,
+                ),
+            ]);
+            let qps_card = interactive_card(
+                state,
+                CardId::QueryRate,
+                area,
+                i18n::text(lang, Msg::CardQueryRate),
+                &i18n::total_queries(lang, snap.total_queries),
+                theme::BORDER_DIM,
+            );
+            render_metric_with_trend(
+                frame,
+                area,
+                qps_card,
+                qps_line,
+                &snap.qps_history,
+                theme::CHART_QPS,
+            );
+        }
+        CardId::Processes
+        | CardId::Sockets
+        | CardId::SqlStream
+        | CardId::Inspector
+        | CardId::TopSqlRanking
+        | CardId::SqlDetail
+        | CardId::AlertLog
+        | CardId::AlertDetail
+        | CardId::Gate
+        | CardId::ChartSqlMix
+        | CardId::ChartTopTables => {}
+    }
 }
 
 // 값 한 줄 아래 스파크라인 (높이가 모자라면 값만)
+// value 첫 조각 = 범례 표식, 둘째 = 주 값: 둘이 한 줄에 다 들어가지 않으면 표식을 빼고 계열도 그리지 않음
 fn render_metric_with_trend(
     frame: &mut Frame,
     area: Rect,
     block: Block<'static>,
     value: Line,
     history: &[u64],
-    trend_style: Style,
+    color: Color,
 ) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -212,64 +255,124 @@ fn render_metric_with_trend(
         return;
     }
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    let legend_width: usize = value.spans.iter().take(2).map(Span::width).sum();
+    let legend_fits = legend_width <= usize::from(rows[0].width);
+    let value = if legend_fits {
+        value
+    } else {
+        Line::from(value.spans.into_iter().skip(1).collect::<Vec<_>>())
+    };
     frame.render_widget(Paragraph::new(value), rows[0]);
-    let recent = &history[history.len().saturating_sub(usize::from(rows[1].width))..];
-    frame.render_widget(Sparkline::default().data(recent).style(trend_style), rows[1]);
+    if !legend_fits {
+        return;
+    }
+    let trend = charts::expand_trend(history, rows[1].width);
+    let drawn_width = (trend.len() as u16).min(rows[1].width);
+    let spark_area = Rect::new(
+        rows[1].right() - drawn_width,
+        rows[1].y,
+        drawn_width,
+        rows[1].height,
+    );
+    frame.render_widget(
+        Sparkline::default()
+            .data(trend.iter())
+            .style(Style::new().fg(color)),
+        spark_area,
+    );
 }
 
 // 2. 통합관제 탭 --------------------------------------------------------------
-// 작은 화면: 프로세스 표·인스펙터 우선, 쿼리 스트림은 3행 미만이면 생략
+// 탭 격자: 0행 지표, 표 두 장, 막대 차트 두 장, 쿼리 스트림, 인스펙터 (낮은 화면은 차트 줄, 스트림 순으로 숨김)
 pub fn render_overview_tab(
     frame: &mut Frame,
     area: Rect,
     state: &mut AppState,
     snap: &Arc<MonitorSnapshot>,
 ) {
-    // 1. 상하 분할
-    let inspector_h = (area.height / 3).clamp(3, 6);
-    let top_h = ((u32::from(area.height) * 52 / 100) as u16)
-        .max(5)
-        .min(area.height.saturating_sub(inspector_h));
-    let stream_fits = area.height.saturating_sub(inspector_h + top_h) >= 3;
-    let (top_area, stream_area, inspector_area) = if stream_fits {
-        let rows = state.card_layout.split_cards(
-            &mut state.hit_areas,
-            SplitGroup::OverviewRows,
-            SplitAxis::Rows,
-            area,
-            &[top_h, area.height.saturating_sub(inspector_h)],
-            &[5, 3, 3],
-        );
-        (rows[0], Some(rows[1]), rows[2])
-    } else {
-        let rows = state.card_layout.split_cards(
-            &mut state.hit_areas,
-            SplitGroup::OverviewCompactRows,
-            SplitAxis::Rows,
-            area,
-            &[area.height.saturating_sub(inspector_h)],
-            &[5, 3],
-        );
-        (rows[0], None, rows[1])
-    };
+    // 1. 카드 조건 (지표 줄을 뺼 높이 기준 인스펙터·스트림 높이)
+    let rest_h = area.height.saturating_sub(4);
+    let inspector_h = (rest_h / 3).clamp(3, 6);
+    let stream_h = (rest_h.saturating_sub(inspector_h).saturating_mul(3) / 10).max(3);
+    let mut slots = metric_slots().to_vec();
+    slots.extend([
+        CardSlot {
+            card: CardId::Processes,
+            min_w: 24,
+            min_h: 4,
+            height: SlotHeight::Fill,
+            weight: 55,
+            rank: 0,
+            reserve: 0,
+        },
+        CardSlot {
+            card: CardId::Sockets,
+            min_w: 20,
+            min_h: 4,
+            height: SlotHeight::Fill,
+            weight: 45,
+            rank: 0,
+            reserve: 0,
+        },
+        CardSlot {
+            card: CardId::ChartSqlMix,
+            min_w: 24,
+            min_h: 5,
+            height: SlotHeight::Fixed(6),
+            weight: 1,
+            rank: 2,
+            reserve: 10,
+        },
+        CardSlot {
+            card: CardId::ChartTopTables,
+            min_w: 24,
+            min_h: 5,
+            height: SlotHeight::Fixed(6),
+            weight: 1,
+            rank: 2,
+            reserve: 10,
+        },
+        CardSlot {
+            card: CardId::SqlStream,
+            min_w: 30,
+            min_h: 3,
+            height: SlotHeight::Fixed(stream_h),
+            weight: 1,
+            rank: 1,
+            reserve: 5,
+        },
+        CardSlot {
+            card: CardId::Inspector,
+            min_w: 20,
+            min_h: 3,
+            height: SlotHeight::Fixed(inspector_h),
+            weight: 1,
+            rank: 0,
+            reserve: 0,
+        },
+    ]);
 
-    // 2. 위 줄 좌우 분할 (프로세스 표, 소켓 표 순서 변경 가능)
-    let top_cols = state.card_layout.split_cards(
-        &mut state.hit_areas,
-        SplitGroup::OverviewCols,
-        SplitAxis::Columns,
-        top_area,
-        &[(u32::from(top_area.width) * 55 / 100) as u16],
-        &[24, 20],
-    );
-
-    // 3. 카드 그리기
-    render_process_table(frame, top_cols[0], state, snap);
-    render_socket_table(frame, top_cols[1], state, snap);
-    if let Some(stream_area) = stream_area {
-        render_stream_table(frame, stream_area, state, snap);
+    // 2. 격자 배치와 카드 그리기
+    let layout = state.card_layout;
+    let placed = layout.arrange_tab(&mut state.hit_areas, ActiveTab::Overview, area, &slots);
+    for (card, rect) in placed {
+        match card {
+            CardId::Risk | CardId::Connections | CardId::Traffic | CardId::QueryRate => {
+                render_metric_card(frame, rect, state, snap, card)
+            }
+            CardId::Processes => render_process_table(frame, rect, state, snap),
+            CardId::Sockets => render_socket_table(frame, rect, state, snap),
+            CardId::SqlStream => render_stream_table(frame, rect, state, snap),
+            CardId::Inspector => render_inspector(frame, rect, state),
+            CardId::ChartSqlMix => charts::render_sql_mix(frame, rect, state, snap),
+            CardId::ChartTopTables => charts::render_top_tables(frame, rect, state, snap),
+            CardId::TopSqlRanking
+            | CardId::SqlDetail
+            | CardId::AlertLog
+            | CardId::AlertDetail
+            | CardId::Gate => {}
+        }
     }
-    render_inspector(frame, inspector_area, state);
 }
 
 // 3. 프로세스 표 --------------------------------------------------------------

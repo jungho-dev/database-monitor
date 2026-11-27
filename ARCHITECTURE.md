@@ -34,9 +34,11 @@
     - Timers wake the loop: toast expiry (4 seconds), the 400 ms card long press, and the alarm blink while critical.
     - Mouse movement redraws only when the hover target (card, border, column edge, scrollbar track) changes; key release events are ignored.
 6. **Card resizing**
-    - `CardLayout` keeps the border positions of each card group (metric row and column, overview rows and columns, per-tab list and detail) in ten-thousandths, plus the card order of each group; a group that was not changed keeps the default layout.
-    - On every draw, the ratios convert to the current terminal size and the minimum size of each card is guaranteed from the first card on; the metric row height is limited so the alert banner and 8 content rows always remain.
-    - A split returns rectangles indexed by card, so reordering cards never changes a view call site; slot sizes stay with the slot.
+    - `CardLayout` keeps one card grid per tab (`TabGrid` in `tui/layout/grid.rs`: at most 6 rows of at most 6 cards, `GRID_SLOTS`) and that tab's border ratios in ten-thousandths; a tab that was not changed keeps its default grid.
+    - Row 0 of every tab holds the four metric cards; the other default rows are Processes + Sockets, SQL Mix + Top Tables by RX, SQL stream, and Inspector on Overview, and the tab's table and detail card on the other tabs.
+    - On every draw, `plan_lines` turns the grid and each card's size condition (`CardSlot`: minimum size, fixed or fill height, rank, reserve) into visible lines: a row wider than the terminal wraps onto the next line, and when the height falls short the lines with the highest rank hide first (the chart row, then the SQL stream), then lines hide from the bottom.
+    - The alert banner (siren band) is drawn at the top of the body, above the grid.
+    - Ratios are kept per tab: width cuts per grid row (`<tab>_cols_<row>`) and line height cuts per visible line count (`<tab>_rows_<count>`).
     - Border drag areas are tested before row clicks and header sorting; a card title outranks a border grab that overlaps it.
 7. **Card selection highlight**
     - `views::common::interactive_card` registers each card's `CardId`, area, and title area; the alert banner and the overlays are not targets.
@@ -50,7 +52,7 @@
     - Sorting and alert de-duplication use the typed values (the diagnosis columns compare `RiskReason`, the alert key is `(PID, RiskRule)`), so a language switch never reorders rows or moves the selection.
     - Non-TUI output is English: the `--once` text, log lines, and stderr notices; `--json` keeps its field names and carries the English catalog text in the reason fields.
 9. **State file**
-    - `~/.config/database-monitor/tui.toml` holds the version, language, card orders, split ratios, column widths, and the tab order (`tab_order`, written only when not the default and skipped unless it is a permutation of the four tabs; `l` keeps it); see section 9.
+    - `~/.config/database-monitor/tui.toml` holds the version, language, card grids (`[grids]`), grid ratios (`[grid_ratios]`), column widths, and the tab order (`tab_order`, written only when not the default and skipped unless it is a permutation of the four tabs; `l` keeps it); see section 9.
 
 ---
 
@@ -99,6 +101,8 @@ database-monitor/
 │     ├─ theme.rs
 │     ├─ i18n.rs
 │     ├─ layout.rs
+│     ├─ layout/
+│     │  └─ grid.rs
 │     ├─ layout_store.rs
 │     ├─ state_writer.rs
 │     ├─ format.rs
@@ -111,6 +115,7 @@ database-monitor/
 │     └─ views/
 │        ├─ mod.rs
 │        ├─ common.rs
+│        ├─ charts.rs
 │        ├─ overview.rs
 │        ├─ processes.rs
 │        ├─ top_sql.rs
@@ -118,6 +123,8 @@ database-monitor/
 └─ tests/
    ├─ monitor.rs
    ├─ tui.rs
+   ├─ tui_charts.rs
+   ├─ tui_grid.rs
    └─ common/mod.rs
 ```
 ```markdown
@@ -142,8 +149,9 @@ tui/mod.rs: terminal restore guard and panic hook, event loop, command dispatch,
 tui/state.rs: screen state, key transitions returning a command enum, toast and freshness
 tui/theme.rs: Indexed color palette and shared styles
 tui/i18n.rs: English and Korean message catalog, including the text of typed reasons, summaries, and stop outcomes
-tui/layout.rs: per-group border ratios and card order, split within minimum sizes, border drag areas
-tui/layout_store.rs: tui.toml load, atomic save, symbolic link chain resolution, stale temporary file cleanup
+tui/layout.rs: per-tab card grids and their border ratios, border drag areas
+tui/layout/grid.rs: tab grid (rows of cards), default grids, card keys for the state file, visible line planning, drop target resolution, Shift+arrow moves
+tui/layout_store.rs: tui.toml load (with the legacy `[orders]` / `[ratios]` migration), atomic save, symbolic link chain resolution, stale temporary file cleanup
 tui/state_writer.rs: state save thread (coalescing queue, bounded join on exit, failures returned as a UiMessage)
 tui/mouse.rs: pointer gestures with an injected clock (hover, click, card border, column edge, scrollbar, and tab drags, wheel)
 tui/card_move.rs: card move (long press on the title, preview, commit, cancel, Shift+arrows)
@@ -152,9 +160,11 @@ tui/format.rs: display-width text fitting
 tui/cards.rs: card ids and kinds, hit areas, scrollbar thumb math
 tui/sort.rs: typed sort keys and the three-step sort cycle
 tui/poller.rs: collector thread that owns the engine
-tui/views/: pure render functions that record hit areas (mod.rs chrome and overlays, common.rs cards and tables, one file per tab)
+tui/views/: pure render functions that record hit areas (mod.rs chrome and overlays, common.rs cards and tables, charts.rs bar cards and sparkline trend, one file per tab)
 tests/monitor.rs: integration tests for the engine, risk, and divider width
 tests/tui.rs: screen tests that render every tab into a test buffer
+tests/tui_charts.rs: bar card rows and rendering, sparkline legend and colors
+tests/tui_grid.rs: grid render and gesture tests
 tests/common/mod.rs: shared fixtures
 ```
 
@@ -382,15 +392,19 @@ sequenceDiagram
     - Save: a commit event builds the file text on the UI thread and queues it to the `database-monitor-state-writer` thread (`tui/state_writer.rs`); requests for one path coalesce to the latest, a failed write comes back as `UiMessage::StateSaveFailed` and shows an error toast, and on exit the guard writes the remaining request and joins with a 5-second limit (a stderr warning when the disk stalls longer).
     - Write: temporary file in the resolved file's folder, `sync_all`, then rename over the resolved file; the symbolic link chain is followed up to 16 links (a longer chain or a loop is an error), so a link to a synced folder keeps pointing to the same target.
     - Load: temporary files older than 60 seconds (and not this process's) are removed, so another running instance's file stays; an unreadable or other-version file is copied to `tui.toml.bak` before the first overwrite, and invalid entries are skipped; column widths are capped at 512.
+    - Migration: a file with the legacy `[orders]` / `[ratios]` tables is read once and converted into `[grids]` and `[grid_ratios]` (the metric card order and width ratio go to row 0 of every tab, the Overview table width ratio to Overview row 1, and a grid already stored for a tab wins over that tab's `[orders]`); row-height ratios are dropped, the converted tables are never written again, and the file is copied to `tui.toml.bak` at load, before the first save.
     - Save happens only on commit events (card move, split drag, column drag, tab move, language switch, layout reset), never on render, hover, or scroll.
 4. **Cards and gestures**
-    - A 400 ms long press on a card title enters move mode; dragging previews the new order live, release commits, `Esc`, a resize, or a tab switch restores the order.
+    - A 400 ms long press on a card title enters move mode; dragging previews the new grid live across rows, release commits and saves, `Esc`, a resize, or a tab switch restores the grid from before the press.
+    - The drop target comes from the lines drawn when the card was pressed (`resolve_drop`): a row's bottom border or another row's top border makes a new row, the inside of a row joins it before or after a neighbor, and the top border of the moving card's own row counts as inside; a row left empty is removed, and a drop that would pass 6 rows or 6 cards in a row is refused and the preview stays.
+    - A move on one tab never changes another tab's grid.
     - A lost button release resolves to what the screen shows: the first buttonless move or a new press commits the preview, and that press is consumed.
     - The same rule ends card border, column width, and scrollbar drags: a buttonless move ends them like a release and returns a save request when something moved; a new press resets every drag state first (a moved drag is saved and that press is consumed), and a tab switch commits a moved drag.
     - Pressing a tab and dragging it previews the new tab order, release commits and saves it, `Esc` restores the order from before the press, and a lost release commits the preview; `<` and `>` move the current tab one slot.
     - A column edge shows a faint `│` in the header row at rest; it is grabbed from the edge cell and one header cell on each side, and on hover or drag a `┃` spans the full table height.
     - The move-mode card uses a dashed border (`BorderType::LightDoubleDashed`); double lines stay reserved for overlays.
-    - `Shift+arrows` move the focused card on groups drawn this frame; `l` resets order, sizes, and column widths of the tab and keeps the language.
+    - `Shift+←` / `Shift+→` swap the focused card with its drawn neighbor in the row; `Shift+↑` / `Shift+↓` (`shift_card`) move a card that shares its row into a new row above or below, and a card alone in its row joins the end of the nearest row above or below, so repeated presses alternate; only cards drawn this frame are moved.
+    - `l` resets the grid, grid ratios, and column widths of the current tab only; the tab order and the language stay.
 5. **Tables**
     - Column widths come from a resolver: natural widths first, text columns shrink widest-first to a 3-cell floor, one grow column takes the slack, dragged widths shrink last, and right-most columns hide only at the end.
     - A pinned column (`ColumnFit::Pinned`, used for every risk level column) has a fixed width and hides only after all other columns, so the process table keeps `Risk` at 100x30 and 60x16.
@@ -410,11 +424,15 @@ sequenceDiagram
     - `analysis/decoder.rs`: a long indented `UPDATE` keeps its trailing `WHERE`, incomplete statements raise no missing-condition alert, top-level `WHERE` search (subquery, literal, comment, backtick), leading comment classification, PostgreSQL message length
     - `analysis/reassembly.rs`, `analysis/decoder.rs`: in-order segments assemble, a sequence gap or a timeout gives up as incomplete, size and flow count limits, memory released
     - `collector/mod.rs`: response bytes stay attributed to the latest SQL event and fingerprint after the 150-event rotation
+    - `tui/layout/grid.rs`: default grids with the metric cards on row 0 of every tab, card key round trip, line wrapping, rank-based hiding, drop target resolution, drop caps (6 cards per row, 6 rows), `Shift+arrow` swaps and alternating vertical moves
     - `tui/layout.rs`, `tui/cards.rs`, `tui/sort.rs`, `tui/format.rs`: default layout, neighbor minimum size, ratio kept on resize, card order insertion and restore checks, scrollbar thumb math, sort cycle, width fitting
     - `tui/layout_store.rs`: atomic save, save through a symbolic link, a multi-level link chain, a link loop stopping at the depth limit, `.bak` copy, cleanup of stale temporary files only, range checks, invalid entries skipped; every test injects its own temporary path
+    - `tui/layout_store.rs`: `[grids]` and `[grid_ratios]` round trip, legacy `[orders]` / `[ratios]` migration with one `.bak` and no rewrite, a stored grid winning over a legacy order, invalid legacy values dropped without a notice
     - `tui/state_writer.rs`: coalescing of a request burst, failure reporting and recovery, flush on drop, and a stuck write ending the join with `TimedOut` at the limit
     - `tui/i18n.rs`: every key has an English and a Korean entry; every `RiskReason` variant reads in both languages and English holds no Hangul; stop and kill outcomes render per language with untranslated system text
-2. **Integration tests (`tests/monitor.rs`, `tests/tui.rs`)**
+2. **Integration tests (`tests/monitor.rs`, `tests/tui.rs`, `tests/tui_charts.rs`, `tests/tui_grid.rs`)**
+    - `tests/tui_charts.rs`: SQL Mix rows (per-kind sums) and Top Tables by RX rows (`!n` warning flag), bar rendering at 44 and 24 columns, trend repetition, sparkline series colors with a `━` legend mark and a right-aligned sparkline
+    - `tests/tui_grid.rs`: default grids of every tab at 60x16, 100x30, and 130x40 in both languages, chart row visibility, the siren band above the grid, long press and drag moves across rows, border drops, lost release, `Esc`/resize/tab-switch restore, `Shift+arrow` moves, `l` resetting only the current tab, and every drop target rendering without overlap
     - Risk judgment with fixed `tick_with` input (field log cases moved to documentation addresses), and one live engine collection
     - `--json` field names stay and the reason fields carry English text with no Hangul
     - Local DB and Redis risk exclusion, idle connection pool `SAFE`, no false positives for Spring polling and conditional writes
